@@ -1394,7 +1394,7 @@ Regex help examples:
         }
         const delMatch = line.match(/^(d|del)\s+(.+)$/i);
         if (delMatch) {
-            const target = delMatch[1].trim();
+            const target = line.replace(/^(?:d|del)\s+/i, '').trim();
             let idx = -1;
             if (/^\d+$/.test(target)) {
                 const n = Math.max(0, parseInt(target, 10) - 1);

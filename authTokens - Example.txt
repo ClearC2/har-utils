@@ -1,0 +1,3 @@
+eyJ0....bUmIHw2hGn8cQ8XBeU5CmUIg  ( the encrypted value of your token from an API call)
+abc...123 [optional other tokens, chosen randomly]
+def...456 [optional other tokens, chosen randomly]

@@ -450,7 +450,7 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
         )).trim();
 
         if (/^(h|help)$/i.test(v)) {
-            console.log("\nRun this SQL to export your existing data (with headers):\n");
+            console.log("\nRun this SQL to select existing data, then export or copy it (with headers) to a .csv file:\n");
             console.log(buildTopIdsSql(entityKey, entity, nUpdate));
             console.log("");
             continue;
@@ -545,8 +545,9 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
 
         console.log("");
 
-        const sel = (await ask("Entity number or name, or Q to Generate HAR and exit: ")).trim();
-        if (/^(q|quit)$/i.test(sel)) break; // exit loop → write once
+        const sel = (await ask("Entity number or name, G to Generate HAR and exit, Q to quit: ")).trim();
+        if (/^(g)$/i.test(sel)) break; // exit loop → write once
+        if (/^(q)$/i.test(sel)) return 0; 
 
         let entityKey = null;
         const num = parseInt(sel, 10);

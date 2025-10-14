@@ -1509,7 +1509,7 @@ Regex help examples:
 
 
 /*
-Backfills updateAPI column from CreateAPI or vice-versa, based upon the most populated column.
+Backfills updateAPI column from CreateAPI column or vice-versa, based upon the most populated column.
  */
 async function runBackfill(entity) {
     const cols = entity.schema || [];

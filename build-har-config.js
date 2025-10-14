@@ -1282,12 +1282,30 @@ async function tableEditor(rl, cfg, entityKey) {
     async function _pickRegexPattern(rl, colName, entityKey, inferredType, currentPattern) {
         const items = _regexExamplesForType(inferredType || '');
         if (!items.length) {
+            console.log( `
+Regex help examples:
+  • Email: ^[\\w._%+-]+@[A-Za-z0-9.-]+\\.(com|net|org|edu|gov)$
+      e.g. address@example.com or user+tag@school.edu
 
-            console.log('\\nRegex help examples:');
-            console.log('  • Email: address@[a-z]{4,10}\\\\.(com|net|org)');
-            console.log('  • Phone: (214) 555-7890  or  214-555-7890  or  +1 214 555 7890');
-            console.log('  • ZIP:   75001  or  75001-1234');
-            console.log('  • State: TX/CA/NY (US two-letter codes)\\n');
+  • Phone: ^(\\+1\\s?)?(\\(?\\d{3}\\)?[-.\\s]?)\\d{3}[-.\\s]?\\d{4}$
+      e.g. (214) 555-7890 or 214-555-7890 or +1 214 555 7890
+
+  • ZIP: ^\\d{5}(-\\d{4})?$
+      e.g. 75001 or 75001-1234
+
+  • State: ^(A[KLRZ]|C[AOT]|D[CE]|F[LM]|G[AU]|H[I]|I[ADLN]|K[SY]|LA|M[ADEINOST]|N[CDEHJMVY]|O[HKR]|P[AWR]|RI|S[CD]|T[NX]|UT|V[AIT]|W[AIVY])$
+      e.g. TX, CA, NY
+
+  • Alpha (1–10 letters): ^[A-Za-z]{1,10}$
+      e.g. Rich or TestValue
+
+  • Alphanumeric (1–10 chars): ^[A-Za-z0-9]{1,10}$
+      e.g. C2User01 or Test1
+
+  • Extension (3–5 digits): ^\\d{3,5}$
+      e.g. 123 or 4567
+`);
+
             const retry = await askInlinePrefilled(rl, `(${colName}) GenRegex (blank = none): `, currentPattern || '');
             return retry || '';
         }
@@ -1322,8 +1340,7 @@ async function tableEditor(rl, cfg, entityKey) {
             const type = _inferTypeByName(col.name);
             if (!type) continue;
 
-            const picked = await _pickRegexPattern(rl,col.name, entityKey, type, '');
-            if (picked) col.generatePatternRegex = picked;
+            col.generatePatternRegex  = await _pickRegexPattern(rl,col.name, entityKey, type, '');
         }
         console.log('CREATEREGEX pass complete.');
     }
@@ -1450,7 +1467,8 @@ async function tableEditor(rl, cfg, entityKey) {
 
         while (true) {
             const caf = await askInlinePrefilled(rl, `(${entityKey}) createApiField (blank = none): `, col.createApiField || '');
-            const v = String(caf || '').trim();
+            const v =
+                String(caf || '').trim();
             if (v && _isDuplicate(entity.schema, 'createApiField', v, idxSelf)) {
                 console.log('⚠️  Another row already uses that createApiField. Please enter a unique value.');
                 continue;

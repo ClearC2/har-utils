@@ -78,7 +78,8 @@ function askInlinePrefilled(rl, label, defValue) {
     return new Promise((resolve) => {
         const shown = defValue != null ? String(defValue) : "";
         _rl.question(`${label} `, (answer) => {
-            const out = answer === "" ? shown : answer;
+            //const out = answer === "" ? shown : answer;
+            const out = answer;
             if (autoClose) _rl.close();
             resolve(out);
         });

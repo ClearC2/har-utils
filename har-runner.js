@@ -77,10 +77,18 @@ async function askYesNoPrefill(label, programmedDefaultBool, configYN) {
 
 
 /** Current timestamp as ISO UTC string. */
-function nowIsoUtc() { return new Date().toISOString(); }
+function localTsYmdHms(d = new Date()) {
+    const pad = n => String(n).padStart(2, '0');
+    return [
+        d.getFullYear(),
+        pad(d.getMonth() + 1),
+        pad(d.getDate())
+    ].join('-') + ' ' + [pad(d.getHours()), pad(d.getMinutes()), pad(d.getSeconds())].join(':');
+}
+
 
 /** Compact timestamp for filenames (no colons, timezone Z). */
-function tsForFile() { return nowIsoUtc().replace(/[:-]/g, '').replace(/\.\d{3}Z$/, 'Z'); }
+function tsForFile() { return localTsYmdHms().replace(/[:-]/g, '').replace(/\.\d{3}Z$/, 'Z'); }
 
 /** Empirical percentile selection without interpolation. */
 function percentile(values, p) {
@@ -90,12 +98,6 @@ function percentile(values, p) {
     return sorted[Math.min(idx, sorted.length - 1)];
 }
 /** Escape a string and wrap in quotes for CSV. */
-function toCsvField(str) { return `"${String(str ?? '').replace(/"/g, '""')}"`; }
-/** Ensure parent directory exists; create recursively if missing. */
-function ensureDirForFile(fp) {
-    const d = path.dirname(path.resolve(fp));
-    if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
-}
 function truncateUrl(url) { return !url ? '' : (url.length > 75 ? url.slice(0,75) + '...' : url); }
 
 // ---------- base64url / JWT helpers ----------
@@ -176,8 +178,87 @@ function prepareQueue(entries) {
     return out;
 }
 
-// ---------- exceptions file (NEW columns: url, response, post) ----------
-// ---------- exceptions file (NEW columns: method, url, response, post, headers) ----------
+
+/** === Global Stats CSV (header-or-append) === */
+function ensureDirForFile(fp) { fs.mkdirSync(path.dirname(fp), { recursive: true }); }
+function toCsvField(v) {
+    if (v === null || v === undefined) return '';
+    const s = String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+const GLOBAL_CSV_COLUMNS = [
+    'timestamp','run_title','avg_ms','min_ms','max_ms','p50_ms','p90_ms','p99_ms',
+    'total_hars','inputs','threads_per_file','max_minutes','max_calls_per_thread',
+    'total_threads_spawned','executed_requests',
+    'exceptions_total','c2xx','c3xx','c4xx','c5xx','error_status'
+];
+function appendGlobalStatsCsvRow(csvPath, columns, values) {
+    try {
+        ensureDirForFile(csvPath);
+        const needsHeader = !fs.existsSync(csvPath) || fs.statSync(csvPath).size === 0;
+        if (needsHeader) fs.appendFileSync(csvPath, columns.map(toCsvField).join(',') + '\n', 'utf8');
+        fs.appendFileSync(csvPath, values.map(toCsvField).join(',') + '\n', 'utf8');
+    } catch (e) {
+        console.error('Failed to write global stats CSV:', e && e.message ? e.message : e);
+    }
+}
+/** Build a row exactly matching the sample CSV header. */
+function buildGlobalCsvRow(opts) {
+    const {
+        timestamp, runTitle, avgMs, minMs, maxMs, p50, p90, p99,
+        totalHars, inputs, threadsPerFile, maxMinutes, maxCallsPerThread,
+        totalThreadsSpawned, executedRequests,
+         exceptionsTotal, c2xx, c3xx, c4xx, c5xx, err
+    } = opts;
+    return [
+        timestamp, runTitle, Number.isFinite(avgMs) ? avgMs.toFixed(2) : 0,
+        minMs, maxMs, p50, p90, p99, totalHars, inputs, threadsPerFile, maxMinutes, maxCallsPerThread,
+        totalThreadsSpawned, executedRequests,
+         exceptionsTotal, c2xx, c3xx, c4xx, c5xx, err
+    ];
+}
+
+async function resolveCsvPath(initialPath, cfgPrefill) {
+    let p = initialPath;
+
+    while (true) {
+        // If it doesn't exist, we're done.
+        if (!fs.existsSync(p)) return { path: p, mode: 'new' };
+
+        console.log(`\n"${p}" already exists.`);
+        const rawInput = (await ask(`Choose action for ${p}: [A]ppend / [O]verwrite / new filename (default: A): `)).trim();
+
+        // Default or explicit Append
+        if (!rawInput || /^a(ppend)?$/i.test(rawInput)) {
+            console.log('→ Appending to existing file.');
+            return { path: p, mode: 'append' };
+        }
+
+        // Overwrite (truncate so header-or-append logic will write a header)
+        if (/^o(verwrite)?$/i.test(rawInput)) {
+            try {
+                fs.writeFileSync(p, ''); // truncate
+                console.log('→ Overwriting existing file.');
+                return { path: p, mode: 'overwrite' };
+            } catch (e) {
+                console.error(`Error overwriting ${p}:`, e.message);
+                continue; // ask again
+            }
+        }
+
+        // Treat anything else as the NEW FILENAME the user just typed
+        let candidate = rawInput.replace(/(^["']|["']$)/g, ''); // strip surrounding quotes
+        if (!/\.csv$/i.test(candidate)) candidate += '.csv';   // ensure .csv extension
+        if (!candidate.trim()) {
+            // Fallback: explicit prompt with prefill preserved
+            candidate = await askPrefill('Enter a new CSV filename', p, cfgPrefill || p);
+        }
+
+        p = candidate.trim();
+        // loop continues; existence is checked at the top again
+    }
+}
+
 /** Open a CSV writer for thrown-fetch exceptions, including request context. */
 function openExceptionWriterFor(harPath) {
     const baseNoExt = path.join(path.dirname(harPath), path.parse(harPath).name);
@@ -695,7 +776,7 @@ function printIntro(detected) {
     };
     printIntro(detected);
 
-    const runTitle = await askPrefill('Enter a Run Title', '', cfg.run_title || '');
+    const runTitle = await askPrefill('Enter a Run Title (used to label statistics)', '', cfg.run_title || '');
 
     const harList = await selectHarFilesFromCwd(4);
 
@@ -715,13 +796,10 @@ function printIntro(detected) {
     const showPerThreadProgress = await askYesNoPrefill('Show per-thread live progress?', false, cfg.show_per_thread_progress);
 
     let outputCsv = await askPrefill('Run metrics CSV filename', 'run-har-stats.csv', cfg.output_csv || 'run-har-stats.csv');
-    while (fs.existsSync(outputCsv)) {
-        const append = await askYesNoPrefill(`"${outputCsv}" exists — append to it?`, true, 'Y');
-        if (append) break;
-        const newName = await askPrefill('Enter a NEW CSV filename', outputCsv, '');
-        outputCsv = newName || outputCsv;
-        if (!outputCsv.trim()) outputCsv = 'run-har-stats.csv';
-    }
+    const { path: resolvedCsv /*, mode*/ } = await resolveCsvPath(outputCsv, cfg.output_csv || outputCsv);
+    outputCsv = resolvedCsv;
+
+
 
     const newCfg = {
         run_title: runTitle,
@@ -883,4 +961,40 @@ function printIntro(detected) {
     }
 
     printSummaryBlock('=== Global Total ===', globalSum, [], null);
+
+    // === Write GLOBAL stats CSV row ===
+    try {
+        const counts = (globalSum && (globalSum.statusCounts || global.statusCounts)) || {};
+        const c2 = (counts['2xx'] || counts[200] || 0);
+        const c3 = (counts['3xx'] || counts[300] || 0);
+        const c4 = (counts['4xx'] || counts[400] || 0);
+        const c5 = (counts['5xx'] || counts[500] || 0);
+        const err = (counts['ERROR'] || counts['error'] || 0);
+        const totalHars = (Array.isArray(harList) ? harList.length : (Array.isArray(cfg.har_files) ? cfg.har_files.length : 0));
+        const totalThreads = (threadsPerFile||0) * (totalHars||0);
+        const inputs = harInfos.map(h => path.basename(h.path)).join(',');
+        const row = buildGlobalCsvRow({
+            timestamp: localTsYmdHms(),
+            runTitle,
+            avgMs: globalSum.avgMs || 0,
+            minMs: globalSum.minMs || 0,
+            maxMs: globalSum.maxMs || 0,
+            p50: globalSum.p50 || 0,
+            p90: globalSum.p90 || 0,
+            p99: globalSum.p99 || 0,
+            totalHars,
+            inputs,
+            threadsPerFile,
+            maxMinutes,
+            maxCallsPerThread,
+            totalThreadsSpawned: totalThreads,
+            executedRequests: globalSum.totalRequests || 0,
+            exceptionsTotal: globalSum.exceptions || global.exceptions || 0,
+            c2xx: c2, c3xx: c3, c4xx: c4, c5xx: c5, err
+        });
+        appendGlobalStatsCsvRow(outputCsv, GLOBAL_CSV_COLUMNS, row);
+        console.log(`\nStatistics written to: ${outputCsv}`);
+    } catch (e) {
+        console.error('Global CSV write failed:', e && e.message ? e.message : e);
+    }
 })();

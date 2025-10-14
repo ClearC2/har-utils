@@ -1508,7 +1508,9 @@ Regex help examples:
 }
 
 
-
+/*
+Backfills updateAPI column from CreateAPI or vice-versa, based upon the most populated column.
+ */
 async function runBackfill(entity) {
     const cols = entity.schema || [];
     const countCreatePopulated = cols.reduce((n,c)=>n + (!!(c.createApiField||'').trim()), 0);

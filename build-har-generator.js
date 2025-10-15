@@ -476,7 +476,8 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
         console.log("  3) random-no-reuse       – random order, no repeats");
         console.log("  4) random-with-reuse     – random order, repeats allowed");
         console.log("");
-        const choice = (await askInlinePrefilled(null, "Choose [default=4]:", "4")).trim();
+        //const choice = (await askInlinePrefilled(null, "Choose [default=4]:", "")).trim();
+        const  choice = (await  askNumberInlineNoDefault(`Choose [3) random-no-reuse]`, 3)).toString();
         const reuseMap = {
             "1": "sequential-no-reuse",
             "2": "sequential-with-reuse",

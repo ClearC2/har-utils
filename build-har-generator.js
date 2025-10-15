@@ -31,6 +31,7 @@ const {
 } = require("./build-har-common");
 
 
+
 /** Print message and terminate with non-zero exit code. */
 function die(msg) {
     console.error(msg);
@@ -44,6 +45,7 @@ function ensureConfig() {
     if (!cfg.entities || typeof cfg.entities !== "object") die(`Config missing "entities" at: ${path.resolve(CONFIG_PATH)}`);
     return cfg;
 }
+
 
 
 /** Inline numeric prompt; blank yields the minimum value (default 0). */
@@ -139,7 +141,6 @@ function shapePayload({ side, entity, body }) {
 
 
 function _randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-
 
 
 
@@ -266,40 +267,84 @@ function genFallbackForColumn(col) {
     return (typeof byType === 'string') ? byType.slice(0, maxLen) : byType;
 }
 
+/** NEW: choose a random subset by percentage (rounded) */
+function chooseByPercent(arr, percent) {
+    const len = Array.isArray(arr) ? arr.length : 0;
+    const p = Math.max(0, Math.min(100, Number(percent) || 0));
+    const n = Math.max(0, Math.min(len, Math.round(len * (p / 100))));
+    if (n === 0) return [];
+    const copy = arr.slice();
+    shuffleInPlace(copy);
+    return copy.slice(0, n);
+}
 
-/** Build request body for create/update honoring CSV overrides, static values, and regex generation. */
-function buildBodyForSide({ side, schema, csvRow, csvHeadersLower }) {
+/**
+ * Build request body for create/update honoring CSV overrides, static values, and regex generation,
+ * then apply fill% selection over the "change pool".
+ *
+ * Rules:
+ * - CREATE: never send serverGeneratedOnCreate; required + static are always included; immutable/static/required are not in the pool.
+ * - UPDATE: immutable are never in the pool (unless they have staticValue, which is included earlier); required are eligible for the pool.
+ * - We never send blanks; we omit non-selected fields on UPDATE.
+ */
+function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent, entity }) {
     const body = {};
+    const pool = [];
+
     for (const col of (schema || [])) {
         const field = side === "create" ? col.createApiField : col.updateApiField;
         if (!field) continue;
 
+        const hasStatic = Object.prototype.hasOwnProperty.call(col, "staticValue");
+        const isImmutable = !!col.immutable;
+        const isRequired = !!col.required;
+        const isSrvCreate = !!col.serverGeneratedOnCreate;
 
+        // CSV overrides for UPDATE
         if (side === "update" && csvRow && csvHeadersLower && csvHeadersLower.includes(String(field).toLowerCase())) {
             body[field] = csvRow[field];
             continue;
         }
 
+        // Never send serverGeneratedOnCreate on CREATE (wins over static)
+        if (side === "create" && isSrvCreate) {
+            continue;
+        }
 
-        if (Object.prototype.hasOwnProperty.call(col, "staticValue")) {
+        // Static always included
+        if (hasStatic) {
             body[field] = col.staticValue;
             continue;
         }
 
-
+        // Candidate value (regex → fallback)
+        let valueChosen = undefined;
         if (col.generatePatternRegex) {
             const maxLen = (Number(col.maxLength) || Number(col.length) || 256);
             const r = genFromRegexPattern(col.generatePatternRegex, maxLen);
-            if (r.ok) {
-                body[field] = r.value;
-                continue;
-            }
+            if (r.ok) valueChosen = r.value;
+        }
+        if (valueChosen === undefined) valueChosen = genFallbackForColumn(col);
 
+        // CREATE: required are always included; not part of pool
+        if (side === "create" && isRequired) {
+            body[field] = valueChosen;
+            continue;
         }
 
+        // Immutable never in the pool (both sides)
+        if (isImmutable) {
+            // Nothing else to do; immutable gets skipped unless it was static (already handled)
+            continue;
+        }
 
-        body[field] = genFallbackForColumn(col);
+        // Otherwise, eligible for pool
+        pool.push({ field, value: valueChosen });
     }
+
+    // Select by percent
+    const selected = chooseByPercent(pool, fillPercent);
+    for (const s of selected) body[s.field] = s.value;
 
     return body;
 }
@@ -548,7 +593,7 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
 
         const sel = (await ask("Entity number or name, G to Generate HAR and exit, Q to quit: ")).trim();
         if (/^(g)$/i.test(sel)) break; // exit loop → write once
-        if (/^(q)$/i.test(sel)) return 0; 
+        if (/^(q)$/i.test(sel)) return 0;
 
         let entityKey = null;
         const num = parseInt(sel, 10);
@@ -567,8 +612,38 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
         const schema = entity.schema || [];
 
         console.log("");
+        // NEW: per-entity fill % (sticky defaults; first-run default 50)
+        const priorCreatePct = Number(entity?.fill?.createPercent);
+        const priorUpdatePct = Number(entity?.fill?.updatePercent);
+        const defCreatePctStr = Number.isFinite(priorCreatePct) ? String(priorCreatePct) : "50";
+        const defUpdatePctStr = Number.isFinite(priorUpdatePct) ? String(priorUpdatePct) : "50";
+
+        let createPercent = Number(defCreatePctStr);
+        let updatePercent = Number(defUpdatePctStr);
+
         const nCreate = await askNumberInlineNoDefault(`How many CREATE calls for ${entityKey}?`, 0);
+        if (nCreate > 0) {
+            const ans = (await askInlinePrefilled(null, `Fill % for optional fields on CREATE (${entityKey}) [0-100]:`, defCreatePctStr)).trim();
+            const v = ans === "" ? defCreatePctStr : ans;
+            createPercent = Math.max(0, Math.min(100, Number(v) || 0));
+        }
+
         const nUpdate = await askNumberInlineNoDefault(`How many UPDATE calls for ${entityKey}?`, 0);
+        if (nUpdate > 0) {
+            const ans = (await askInlinePrefilled(null, `Fill % for optional fields on UPDATE (${entityKey}) [0-100]:`, defUpdatePctStr)).trim();
+            const v = ans === "" ? defUpdatePctStr : ans;
+            updatePercent = Math.max(0, Math.min(100, Number(v) || 0));
+        }
+
+        // Persist fill% immediately so they become defaults next time
+        entity.fill = entity.fill || {};
+        entity.fill.createPercent = createPercent;
+        entity.fill.updatePercent = updatePercent;
+        const cfgNow = loadJsonc(CONFIG_PATH, null);
+        if (cfgNow && cfgNow.entities && cfgNow.entities[entityKey]) {
+            cfgNow.entities[entityKey].fill = { createPercent, updatePercent };
+            saveJsonc(CONFIG_PATH, cfgNow);
+        }
 
         let pickKey = null;
         if (nUpdate > 0) {
@@ -578,7 +653,7 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
 
         // CREATE
         for (let i = 0; i < nCreate; i++) {
-            const body = buildBodyForSide({ side: "create", schema, csvRow: null, csvHeadersLower: null });
+            const body = buildBodyForSide({ side: "create", schema, csvRow: null, csvHeadersLower: null, fillPercent: createPercent, entity });
             const shaped = shapePayload({ side: "create", entity, body });
             const url = joinUrl(bits.host, bits.createPath);
             allEntries.push(buildHarEntry({ method: bits.createMethod, url, body: shaped }));
@@ -591,7 +666,7 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
             if (!idVal) die(`No "${bits.idCol}" value present in selected key row.`);
 
             const csvHeadersLower = Object.keys(keyObj).map(k => k.toLowerCase());
-            const body = buildBodyForSide({ side: "update", schema, csvRow: keyObj, csvHeadersLower });
+            const body = buildBodyForSide({ side: "update", schema, csvRow: keyObj, csvHeadersLower, fillPercent: updatePercent, entity });
             const shaped = shapePayload({ side: "update", entity, body });
 
             const updatePathApplied = applyRouteParam(bits.updatePath, bits.idCol, idVal);
@@ -624,7 +699,7 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
     }
     console.log(`Total queued: ${allEntries.length} ${entryWord(allEntries.length)}\n`);
 
-// Inline filename prompt with last-used prefill (editable); keep **relative** path as typed
+    // Inline filename prompt with last-used prefill (editable); keep **relative** path as typed
     const cfg2 = loadJsonc(CONFIG_PATH, null) || {};
     const suggested = cfg2.lastUsedHarPath || uniqueDatedFilename("generated", ".har");
     let outPath;

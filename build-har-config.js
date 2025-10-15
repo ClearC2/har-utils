@@ -1382,8 +1382,6 @@ Regex help examples:
                 isPk: false,
                 immutable: false,
                 serverGeneratedOnCreate: false,
-                requiredOnCreate: false,
-                inUpdateUrl: false,
                 required: false,
                 createApiField: '',
                 updateApiField: ''
@@ -1456,7 +1454,7 @@ Regex help examples:
         col.isPk = /^y(es)?$/i.test(pkVal);
         if (col.isPk) col.immutable = true;
 
-        const reqVal = await askInlinePrefilled(rl, `(${entityKey}) Required on create (Y/N): `, col.required ? 'Y' : 'N');
+        const reqVal = await askInlinePrefilled(rl, `(${entityKey}) Required (Y/N): `, col.required ? 'Y' : 'N');
         col.required = /^y(es)?$/i.test(reqVal);
 
         const immVal = await askInlinePrefilled(rl, `(${entityKey}) Immutable (Y/N): `, col.immutable ? 'Y' : 'N');

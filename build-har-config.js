@@ -25,7 +25,8 @@ const {
 
     collectKeysDeep, decode, formToObj, tryExtractJson,
 
-} = require('./build-har-common');
+
+    askExistingPathPrefill} = require('./build-har-common');
 
 
 
@@ -313,18 +314,6 @@ async function pickEntityWithNewFlag(rl, cfg) {
         if (ok) return { key: input, isNew: true };
     }
 }
-
-
-/** Prompt repeatedly until an existing file path is provided; input prefilled with a suggestion. */
-async function askExistingPathPrefill(rl, label, prefill) {
-    const lbl = label.endsWith(':') ? label : `${label}:`;
-    while (true) {
-        const p = await askInlinePrefilled(rl, lbl, prefill || '');
-        if (p && fs.existsSync(p)) return p;
-        console.log(p ? `File not found: ${p}` : 'Please enter a file path.');
-    }
-}
-
 
 /** Require initial SQL CREATE TABLE for schema discovery when schema is missing. */
 async function requireSql(rl, cfg, entityKey) {
@@ -1086,21 +1075,13 @@ function biasServerGeneratedFromIdParam(entity) {
     col.immutable = true;
 }
 
-
-
-
-
-
-
 function rememberSourcePaths(cfg, entityKey, paths) {
     if (!cfg || !entityKey || !paths || typeof paths !== 'object') return;
-
 
     cfg.entities = cfg.entities || {};
     const ent = cfg.entities[entityKey] || (cfg.entities[entityKey] = {});
     ent.sources = ent.sources || { sqlPath: '', harPath: '' };
     cfg.sourcesLastUsed = cfg.sourcesLastUsed || { sqlPath: '', harPath: '' };
-
 
     if (paths.sqlPath != null && String(paths.sqlPath).trim() !== '') {
         const p = String(paths.sqlPath).trim();
@@ -1108,16 +1089,12 @@ function rememberSourcePaths(cfg, entityKey, paths) {
         cfg.sourcesLastUsed.sqlPath = p;
     }
 
-
     if (paths.harPath != null && String(paths.harPath).trim() !== '') {
         const p = String(paths.harPath).trim();
         ent.sources.harPath = p;
         cfg.sourcesLastUsed.harPath = p;
     }
 }
-
-
-
 
 async function headersEditor(rl, cfg, entityKey) {
     const ent = cfg.entities[entityKey];
@@ -1208,17 +1185,9 @@ async function headersEditor(rl, cfg, entityKey) {
     }
 }
 
-
-
-
-
-
-
-
 async function tableEditor(rl, cfg, entityKey) {
     const entity = cfg.entities[entityKey];
     if (!entity.schema) entity.schema = [];
-
 
     const _nameLooks = (name) => {
         const n = String(name || '').toLowerCase();
@@ -1562,7 +1531,6 @@ function applyAnalysis(entity, analysis, side ) {
 
     const schema = entity.schema || [];
     fillMappingsFromKeysDeep(schema, analysis, side);
-
     inferServerGeneratedFields(entity, analysis);
 }
 

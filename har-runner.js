@@ -10,8 +10,8 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const crypto = require('crypto');
 const readline = require('readline');
+const { askNumberPrefill, askPrefill, askYesNoPrefill, ensureDirForFile, localTsYmdHms, percentile, refreshCompactJWT, shuffleInPlace, toCsvField, truncateUrl, tsForFile } = require('./build-har-common');
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 function ask(q) { return new Promise(res => rl.question(q, ans => res((ans ?? '').trim()))); }
@@ -37,103 +37,6 @@ function saveConfig(fp, cfgObj) {
     delete toSave.__path;
     fs.writeFileSync(fp, JSON.stringify(toSave, null, 2), 'utf8');
     console.log(`[ok] Saved defaults to ${fp}`);
-}
-
-
-/** Prompt with visible default and inline prefilled value pulled from config. */
-function askPrefill(label, programmedDefault, configValue) {
-    return new Promise(resolve => {
-        const prompt = `${label} [${programmedDefault}]: `;
-        rl.question(prompt, ans => {
-            const val = ans;
-            if (val === '') return resolve(programmedDefault);
-            resolve(val);
-        });
-        if (configValue !== undefined && configValue !== null && configValue !== '') {
-            rl.write(String(configValue));
-        }
-    });
-}
-async function askNumberPrefill(label, programmedDefault, configValue) {
-    const raw = await askPrefill(label, String(programmedDefault), (configValue ?? '') === '' ? '' : String(configValue));
-    const n = parseInt(String(raw), 10);
-    if (!Number.isFinite(n) || n < 0) return programmedDefault;
-    return n;
-}
-async function askYesNoPrefill(label, programmedDefaultBool, configYN) {
-    const programmedDefChar = programmedDefaultBool ? 'Y' : 'N';
-    const prompt = `${label} (y/N) [${programmedDefChar}]: `;
-    return new Promise(resolve => {
-        rl.question(prompt, ans => {
-            const a = (ans ?? '').trim().toLowerCase();
-            if (!a) return resolve(programmedDefaultBool);
-            if (a === 'y' || a === 'yes') return resolve(true);
-            if (a === 'n' || a === 'no') return resolve(false);
-            return resolve(programmedDefaultBool);
-        });
-        if (configYN === 'Y' || configYN === 'N') rl.write(configYN);
-    });
-}
-
-
-/** Current timestamp as ISO UTC string. */
-function localTsYmdHms(d = new Date()) {
-    const pad = n => String(n).padStart(2, '0');
-    return [
-        d.getFullYear(),
-        pad(d.getMonth() + 1),
-        pad(d.getDate())
-    ].join('-') + ' ' + [pad(d.getHours()), pad(d.getMinutes()), pad(d.getSeconds())].join(':');
-}
-
-
-/** Compact timestamp for filenames (no colons, timezone Z). */
-function tsForFile() { return localTsYmdHms().replace(/[:-]/g, '').replace(/\.\d{3}Z$/, 'Z'); }
-
-/** Empirical percentile selection without interpolation. */
-function percentile(values, p) {
-    if (!values.length) return 0;
-    const sorted = [...values].sort((a,b)=>a-b);
-    const idx = Math.floor((p / 100) * sorted.length);
-    return sorted[Math.min(idx, sorted.length - 1)];
-}
-/** Escape a string and wrap in quotes for CSV. */
-function truncateUrl(url) { return !url ? '' : (url.length > 75 ? url.slice(0,75) + '...' : url); }
-
-// ---------- base64url / JWT helpers ----------
-/** Base64url encode a UTF‑8 string using URL-safe alphabet and no padding. */
-function base64urlEncodeUtf8(str) {
-    return Buffer.from(str, 'utf8').toString('base64').replace(/=/g, '').replace(/\+/g,'-').replace(/\//g,'_');
-}
-function base64urlEncodeBuf(buf) {
-    return Buffer.from(buf).toString('base64').replace(/=/g, '').replace(/\+/g,'-').replace(/\//g,'_');
-}
-function base64urlDecodeToUtf8(b64u) {
-    const padLen = (4 - (b64u.length % 4)) % 4;
-    const b64 = b64u.replace(/-/g,'+').replace(/_/g,'/') + '='.repeat(padLen);
-    return Buffer.from(b64, 'base64').toString('utf8');
-}
-function signHS256(input, secret) {
-    return base64urlEncodeBuf(crypto.createHmac('sha256', secret).update(input).digest());
-}
-
-/** Refresh an HS256 JWT (update exp and re-sign); pass-through for non-HS256 tokens. */
-function refreshCompactJWT(jwt, secret) {
-    try {
-        const parts = jwt.split('.');
-        if (parts.length !== 3 || !secret) return { ok: false, token: jwt };
-        const header = JSON.parse(base64urlDecodeToUtf8(parts[0]));
-        if (String(header.alg).toUpperCase() !== 'HS256') return { ok: false, token: jwt };
-        const payload = JSON.parse(base64urlDecodeToUtf8(parts[1]));
-        const nowSec = Math.floor(Date.now()/1000);
-        const newHeader = { ...header, alg: 'HS256', typ: 'JWT' };
-        //const newPayload = { ...payload, iat: nowSec, exp: nowSec + THIRTY_DAYS_S };
-        const newPayload = { ...payload, exp: nowSec + (30 * 24 * 60 * 60 ) };
-        const h = base64urlEncodeUtf8(JSON.stringify(newHeader));
-        const p = base64urlEncodeUtf8(JSON.stringify(newPayload));
-        const s = signHS256(`${h}.${p}`, secret);
-        return { ok: true, token: `${h}.${p}.${s}`, payload: newPayload };
-    } catch { return { ok: false, token: jwt }; }
 }
 
 // ---------- HAR parsing & heuristics ----------
@@ -164,9 +67,7 @@ function isXhrHeuristic(entry) {
     return !!(entry._initiator && entry._initiator.type === 'script');
 
 }
-function shuffleInPlace(a) {
-    for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
-}
+
 /** Shuffle entries by fixed-size chunks to distribute load across threads. */
 function prepareQueue(entries) {
     const out = [];
@@ -180,12 +81,6 @@ function prepareQueue(entries) {
 
 
 /** === Global Stats CSV (header-or-append) === */
-function ensureDirForFile(fp) { fs.mkdirSync(path.dirname(fp), { recursive: true }); }
-function toCsvField(v) {
-    if (v === null || v === undefined) return '';
-    const s = String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
 const GLOBAL_CSV_COLUMNS = [
     'timestamp','run_title','avg_ms','min_ms','max_ms','p50_ms','p90_ms','p99_ms',
     'total_hars','inputs','threads_per_file','max_minutes','max_calls_per_thread',

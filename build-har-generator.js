@@ -8,6 +8,7 @@
 "use strict";
 
 const fs = require("fs");
+const { joinUrl, shuffleInPlace, chooseByPercent, _sqlIntCapForType, clampIntForSqlType, coerceAndNormalizeForChangelog, sqlLiteral, simpleEntityName} = require('./build-har-common');
 const path = require("path");
 
 const {
@@ -151,58 +152,12 @@ function clampDecimal19_6(n) {
 }
 
 /** SQL integer caps to avoid overflow in generated values. */
-function _sqlIntCapForType(t) {
-    const T = String(t || '').toUpperCase();
-    if (T.includes('TINYINT'))   return 255;
-    if (T.includes('SMALLINT'))  return 32767;                // positive cap
-    if (T.includes('BIGINT'))    return 9007199254740991;     // Number.MAX_SAFE_INTEGER
-    return 2147483647; // INT default
-}
 
-function clampIntForSqlType(t, n) {
-    if (n == null || n === "") return n;
-    let x = Number(n);
-    if (!Number.isFinite(x)) x = 0;
-    // Use signed ranges; keep above/below zero reasonable
-    const T = String(t || '').toUpperCase();
-    if (T.includes('TINYINT'))   return Math.max(0, Math.min(255, Math.round(x)));
-    if (T.includes('SMALLINT'))  return Math.max(-32768, Math.min(32767, Math.round(x)));
-    if (T.includes('INT'))       return Math.max(-2147483648, Math.min(2147483647, Math.round(x)));
-    if (T.includes('BIGINT')) {
-        const MAX = 9007199254740991; // JS safe
-        const MIN = -9007199254740991;
-        return Math.max(MIN, Math.min(MAX, Math.trunc(x)));
-    }
-    return Math.trunc(x);
-}
+
+
 
 /** Try to coerce and normalize any incoming value for the changelog sinks. */
-function coerceAndNormalizeForChangelog(col, val) {
-    const t = String(col?.type || '').toUpperCase();
-    if (val == null) return val;
 
-    // If it's clearly numeric-like, coerce
-    const looksNumeric = (v) => (typeof v === "number") ||
-        (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v)));
-
-    if (/DECIMAL|NUMERIC|MONEY|SMALLMONEY/.test(t)) {
-        const n = looksNumeric(val) ? Number(val) : 0;
-        return clampDecimal19_6(n);
-    }
-    if (/(^|[^A-Z])(BIGINT|INT|SMALLINT|TINYINT)([^A-Z]|$)/.test(t)) {
-        const n = looksNumeric(val) ? Number(val) : 0;
-        return clampIntForSqlType(t, n);
-    }
-    if (/FLOAT|REAL/.test(t)) {
-        let n = looksNumeric(val) ? Number(val) : 0;
-        if (!Number.isFinite(n)) n = 0;
-        // Keep magnitude sane; FLOAT in SQL Server allows big exponents but don't go wild
-        if (Math.abs(n) > 1e308) n = (n < 0 ? -1 : 1) * 1e308;
-        return n;
-    }
-    // non-numeric → unchanged (strings, dates, etc.)
-    return val;
-}
 
 /** Name-based heuristics for common fields (email, phone, city, etc.). */
 function _fallbackByName(col, maxLen) {
@@ -331,12 +286,9 @@ function _fallbackByType(col, maxLen) {
     return _cap(_randLetters(_randLenPercentOfMax(maxLen, 0.2, 25)));
 }
 
-function _titleCase(s) { s = String(s || ""); return s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s; }
+
 /** Convert keys to a display label. */
-function simpleEntityName(entityKey) {
-    const seg = String(entityKey || "").split("_").pop();
-    return _titleCase(seg || entityKey);
-}
+
 
 /** Combine name/type heuristics, clipped to column length. */
 function genFallbackForColumn(col) {
@@ -350,15 +302,7 @@ function genFallbackForColumn(col) {
 }
 
 /** NEW: choose a random subset by percentage (rounded) */
-function chooseByPercent(arr, percent) {
-    const len = Array.isArray(arr) ? arr.length : 0;
-    const p = Math.max(0, Math.min(100, Number(percent) || 0));
-    const n = Math.max(0, Math.min(len, Math.round(len * (p / 100))));
-    if (n === 0) return [];
-    const copy = arr.slice();
-    shuffleInPlace(copy);
-    return copy.slice(0, n);
-}
+
 
 /**
  * Build request body for create/update honoring CSV overrides, static values, and regex generation,
@@ -437,11 +381,7 @@ function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent, 
     return body;
 }
 
-function joinUrl(host, p) {
-    const h = String(host || "").replace(/\/+$/, "");
-    const s = String(p || "").replace(/^\/+/, "");
-    return `${h}/${s}`;
-}
+
 function buildHarEntry({ method, url, body }) {
     return {
         startedDateTime: new Date().toISOString(),
@@ -463,20 +403,7 @@ function buildHarEntry({ method, url, body }) {
     };
 }
 
-function shuffleInPlace(arr, rng = Math.random) {
-    for (let i = arr.length - 1; i > 0; i--) {
-        const j = Math.floor(rng() * (i + 1));
-        [arr[i], arr[j]] = [arr[j], arr[i]];
-    }
-    return arr;
-}
 
-function sqlLiteral(v) {
-    if (v === null || v === undefined) return "NULL";
-    if (typeof v === "number") return String(v);
-    if (typeof v === "boolean") return v ? "1" : "0";
-    return `'${String(v).replace(/'/g, "''")}'`;
-}
 function buildTopIdsSql(entityKey, entity, numRows) {
     const idParam0 = entity?.routes?.update?.params?.[0];
     if (!idParam0 || !idParam0.column) die(`Entity "${entityKey}" missing routes.update.params[0].column.`);

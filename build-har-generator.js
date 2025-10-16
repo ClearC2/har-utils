@@ -200,36 +200,67 @@ function _fallbackByName(col, maxLen) {
     return null;
 }
 
-/** Type-driven fallbacks for numeric/text/date/boolean columns. */
+/** Type-driven fallbacks for numeric/text/date/boolean columns. *//** Helper: choose a random length between ceil(20% * maxLen) and maxLen (inclusive), with a hard cap (default 25). */
+function _randLenPercentOfMax(maxLen, minFrac = 0.2, hardCap = 25) {
+    const max = Math.max(1, Number(maxLen) || 1);
+    const hi  = Math.min(max, Math.max(1, Number(hardCap) || 1));
+    const lo  = Math.max(1, Math.ceil(hi * Math.max(0, Math.min(1, minFrac))));
+    return _randInt(lo, hi);
+}
+
+/** SQL integer caps to avoid overflow in generated values. */
+function _sqlIntCapForType(t) {
+    const T = String(t || '').toUpperCase();
+    if (T.includes('TINYINT'))   return 255;
+    if (T.includes('SMALLINT'))  return 32767;                // positive range cap
+    if (T.includes('BIGINT'))    return 9007199254740991;     // Number.MAX_SAFE_INTEGER
+    return 2147483647; // INT default
+}
+
 function _fallbackByType(col, maxLen) {
     const t = String(col?.type || '').toUpperCase();
 
-
+    // STRING-ish types (regex-based generation handled elsewhere)
     if (t.includes('CHAR') || t.includes('TEXT') || t.includes('XML') || t.includes('UNIQUEIDENTIFIER')) {
-        const n = Math.max(1, Math.min(maxLen, 12));
-        return _cap(_randLetters(_randInt(Math.min(3,n), n)));
+        const n = _randLenPercentOfMax(maxLen, 0.2, 25); // 20%..100% of maxLen, hard-capped at 25
+        const minSeed = Math.min(3, n);                  // preserve 3..n letter behavior
+        return _cap(_randLetters(_randInt(minSeed, n)));
     }
 
-
+    // INTEGER-ish types
     if (/(^|[^A-Z])(BIGINT|INT|SMALLINT|TINYINT)([^A-Z]|$)/.test(t)) {
-
         if (t.includes('TINYINT')) return _randInt(0, 1);
-        const upper = t.includes('BIG') ? 9_000_000_000 : 100_000;
-        return _randInt(1, Math.min(upper, Math.pow(10, Math.min(6, maxLen))) - 1);
+        const cap = _sqlIntCapForType(t);
+        const capDigits = Math.max(1, Math.floor(Math.log10(cap)) + 1);
+        const usedDigits = _randInt(Math.max(1, Math.ceil(capDigits * 0.2)), capDigits); // 20%..100% of capacity
+        const low  = Math.pow(10, usedDigits - 1);
+        const high = Math.min(cap, Math.pow(10, usedDigits) - 1);
+        return _randInt(low, Math.max(low, high));
     }
 
-
-
+    // DECIMAL/NUMERIC/MONEY/REAL/FLOAT
     if (/DECIMAL|NUMERIC|MONEY|SMALLMONEY|FLOAT|REAL/.test(t)) {
-        const prec = Number(col?.precision) || 8;
-        const scale = Number(col?.scale) || (t.includes('MONEY') ? 2 : 2);
-        const intDigits = Math.max(1, prec - scale);
-        const intPart = String(_randInt(1, Math.pow(10, Math.min(9, intDigits)) - 1));
-        const fracPart = String(_randInt(0, Math.pow(10, Math.min(6, scale)) - 1)).padStart(scale, '0');
+        const prec  = Math.max(1, Number(col?.precision) || 8);
+        const scale = Math.max(0, Number(col?.scale) || (t.includes('MONEY') ? 2 : 2));
+        const intDigitsAllowed = Math.max(1, prec - scale);
+
+        // Choose digits used in 20%..100% ranges
+        const usedInt  = _randInt(Math.max(1, Math.ceil(intDigitsAllowed * 0.2)), intDigitsAllowed);
+        const usedFrac = _randInt(Math.max(0, Math.ceil(scale * 0.2)), scale);
+
+        const intLow  = Math.pow(10, Math.max(1, usedInt) - 1);
+        const intHigh = Math.pow(10, Math.max(1, usedInt)) - 1;
+        const intPart = String(_randInt(intLow, intHigh));
+
+        if (usedFrac <= 0) return Number(intPart);
+
+        const fracMax  = Math.pow(10, Math.min(9, usedFrac)) - 1; // keep sampling reasonable
+        const fracPart = String(_randInt(0, Math.max(0, fracMax))).padStart(usedFrac, '0');
+
         return Number(`${intPart}.${fracPart}`);
     }
 
-
+    // DATE/TIME types: leave behavior unchanged
     if (/DATE|TIME/.test(t)) {
         const now = new Date();
         const daysBack = _randInt(0, 365);
@@ -239,11 +270,10 @@ function _fallbackByType(col, maxLen) {
         return d.toISOString().slice(0,19);
     }
 
-
     if (/\bBIT\b/.test(t)) return _randInt(0,1);
 
-
-    return _cap(_randLetters(Math.min(8, maxLen)));
+    // Generic fallback string with 20%..100% length, hard-capped at 25
+    return _cap(_randLetters(_randLenPercentOfMax(maxLen, 0.2, 25)));
 }
 function _titleCase(s) { s = String(s || ""); return s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s; }
 

@@ -551,15 +551,16 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
         console.log("  3) random-no-reuse       – random order, no repeats");
         console.log("  4) random-with-reuse     – random order, repeats allowed");
         console.log("");
-        //const choice = (await askInlinePrefilled(null, "Choose [default=4]:", "")).trim();
-        const  choice = (await  askNumberInlineNoDefault(`Choose [3) random-no-reuse]`, 3)).toString();
+
+        const choice = (await askInlinePrefilled(null, "Choose [default=4]:", "4")).trim();
         const reuseMap = {
             "1": "sequential-no-reuse",
             "2": "sequential-with-reuse",
             "3": "random-no-reuse",
             "4": "random-with-reuse",
         };
-        const reusePolicy = reuseMap[choice] || "random-with-reuse";
+        // if user hits enter (choice=""), default to "4"
+        const reusePolicy = reuseMap[choice || "4"];
 
         // Persist minimal metadata, keeping user's **relative** path exactly as entered
         const csvPath = v;

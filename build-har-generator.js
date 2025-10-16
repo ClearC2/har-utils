@@ -7,19 +7,30 @@
  */
 "use strict";
 
+
+
 const fs = require("fs");
 const path = require("path");
 
 const {
+
     ask,
     askInlinePrefilled,
+
+
     CONFIG_PATH,
     loadJsonc,
     saveJsonc,
+
+
     canonicalEntityKey,
     listEntitiesCaseInsensitive,
+
+
     uniqueDatedFilename,
 } = require("./build-har-common");
+
+
 
 /** Print message and terminate with non-zero exit code. */
 function die(msg) {
@@ -34,6 +45,8 @@ function ensureConfig() {
     if (!cfg.entities || typeof cfg.entities !== "object") die(`Config missing "entities" at: ${path.resolve(CONFIG_PATH)}`);
     return cfg;
 }
+
+
 
 /** Inline numeric prompt; blank yields the minimum value (default 0). */
 async function askNumberInlineNoDefault(prompt, min = 0) {
@@ -77,8 +90,11 @@ function requireEntityBits(entityKey, entity) {
     };
 }
 
+
+
 let RandExp = null;
 try { RandExp = require("randexp"); } catch {  }
+
 
 /** Generate a value matching a regex using randexp if available; limited fallback otherwise. */
 function genFromRegexPattern(pattern, maxLen = 256) {
@@ -88,6 +104,7 @@ function genFromRegexPattern(pattern, maxLen = 256) {
             re.max = Math.min(re.max, Math.max(1, maxLen));
             return { ok: true, value: re.gen() };
         }
+
         const m = String(pattern).match(/^\^?(\[[^\]]+])\{(\d+)}\$?$/);
         if (m) {
             const cls = m[1]; const n = Math.min(parseInt(m[2], 10) || 1, maxLen);
@@ -106,10 +123,12 @@ function genFromRegexPattern(pattern, maxLen = 256) {
         return { ok: false, value: "" };
     }
 }
-
 /** Apply side-specific JSON wrapper when defined; otherwise return body as-is. */
 function shapePayload({ side, entity, body }) {
+
+
     const wrapKey = entity?.payload?.[side]?.jsonPayloadWrapper;
+
     if (typeof wrapKey === "string" && wrapKey.trim().length > 0) {
         const wrapped = {};
         wrapped[wrapKey] = body;
@@ -118,7 +137,13 @@ function shapePayload({ side, entity, body }) {
     return body;
 }
 
+
+
+
 function _randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+
+
+
 function _pick(arr) { return arr[_randInt(0, arr.length - 1)]; }
 function _randLetters(n) { const A = 'abcdefghijklmnopqrstuvwxyz'; let s=''; for (let i=0;i<n;i++) s += A[_randInt(0,25)]; return s; }
 function _cap(s) { s = String(s||''); return s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s; }
@@ -128,80 +153,6 @@ function _maxLenFromCol(col, fallback=256) {
     const L = Number(col?.maxLength) || Number(col?.length);
     if (Number.isFinite(L) && L > 0) return L;
     return fallback;
-}
-
-/** --- HARD CAPS for the changelog table --- */
-const MAX_DEC19_6_INT_DIGITS = 13; // 19 - 6
-const MAX_DEC19_6_ABS = 9999999999999.999999; // 13 nines + . + 6 nines
-function clampDecimal19_6(n) {
-    if (n == null || n === "") return n;
-    let x = Number(n);
-    if (!Number.isFinite(x)) return 0;
-    // round to 6 fractional digits
-    x = Math.round(x * 1e6) / 1e6;
-    if (x >  MAX_DEC19_6_ABS) return MAX_DEC19_6_ABS;
-    if (x < -MAX_DEC19_6_ABS) return -MAX_DEC19_6_ABS;
-    // also ensure integer digits <= 13 (covers 10^13 - 1)
-    const abs = Math.abs(x);
-    if (abs >= 1e13) {
-        const sign = x < 0 ? -1 : 1;
-        return sign * (1e13 - 1e-6); // 9999999999999.999999
-    }
-    return x;
-}
-
-/** SQL integer caps to avoid overflow in generated values. */
-function _sqlIntCapForType(t) {
-    const T = String(t || '').toUpperCase();
-    if (T.includes('TINYINT'))   return 255;
-    if (T.includes('SMALLINT'))  return 32767;                // positive cap
-    if (T.includes('BIGINT'))    return 9007199254740991;     // Number.MAX_SAFE_INTEGER
-    return 2147483647; // INT default
-}
-
-function clampIntForSqlType(t, n) {
-    if (n == null || n === "") return n;
-    let x = Number(n);
-    if (!Number.isFinite(x)) x = 0;
-    // Use signed ranges; keep above/below zero reasonable
-    const T = String(t || '').toUpperCase();
-    if (T.includes('TINYINT'))   return Math.max(0, Math.min(255, Math.round(x)));
-    if (T.includes('SMALLINT'))  return Math.max(-32768, Math.min(32767, Math.round(x)));
-    if (T.includes('INT'))       return Math.max(-2147483648, Math.min(2147483647, Math.round(x)));
-    if (T.includes('BIGINT')) {
-        const MAX = 9007199254740991; // JS safe
-        const MIN = -9007199254740991;
-        return Math.max(MIN, Math.min(MAX, Math.trunc(x)));
-    }
-    return Math.trunc(x);
-}
-
-/** Try to coerce and normalize any incoming value for the changelog sinks. */
-function coerceAndNormalizeForChangelog(col, val) {
-    const t = String(col?.type || '').toUpperCase();
-    if (val == null) return val;
-
-    // If it's clearly numeric-like, coerce
-    const looksNumeric = (v) => (typeof v === "number") ||
-        (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v)));
-
-    if (/DECIMAL|NUMERIC|MONEY|SMALLMONEY/.test(t)) {
-        const n = looksNumeric(val) ? Number(val) : 0;
-        return clampDecimal19_6(n);
-    }
-    if (/(^|[^A-Z])(BIGINT|INT|SMALLINT|TINYINT)([^A-Z]|$)/.test(t)) {
-        const n = looksNumeric(val) ? Number(val) : 0;
-        return clampIntForSqlType(t, n);
-    }
-    if (/FLOAT|REAL/.test(t)) {
-        let n = looksNumeric(val) ? Number(val) : 0;
-        if (!Number.isFinite(n)) n = 0;
-        // Keep magnitude sane; FLOAT in SQL Server allows big exponents but don't go wild
-        if (Math.abs(n) > 1e308) n = (n < 0 ? -1 : 1) * 1e308;
-        return n;
-    }
-    // non-numeric → unchanged (strings, dates, etc.)
-    return val;
 }
 
 /** Name-based heuristics for common fields (email, phone, city, etc.). */
@@ -249,7 +200,7 @@ function _fallbackByName(col, maxLen) {
     return null;
 }
 
-/** Helper: choose a random length between ceil(20% * maxLen) and maxLen (inclusive), with a hard cap (default 25). */
+/** Type-driven fallbacks for numeric/text/date/boolean columns. *//** Helper: choose a random length between ceil(20% * maxLen) and maxLen (inclusive), with a hard cap (default 25). */
 function _randLenPercentOfMax(maxLen, minFrac = 0.2, hardCap = 25) {
     const max = Math.max(1, Number(maxLen) || 1);
     const hi  = Math.min(max, Math.max(1, Number(hardCap) || 1));
@@ -257,7 +208,15 @@ function _randLenPercentOfMax(maxLen, minFrac = 0.2, hardCap = 25) {
     return _randInt(lo, hi);
 }
 
-/** Type-driven fallbacks for numeric/text/date/boolean columns. */
+/** SQL integer caps to avoid overflow in generated values. */
+function _sqlIntCapForType(t) {
+    const T = String(t || '').toUpperCase();
+    if (T.includes('TINYINT'))   return 255;
+    if (T.includes('SMALLINT'))  return 32767;                // positive range cap
+    if (T.includes('BIGINT'))    return 9007199254740991;     // Number.MAX_SAFE_INTEGER
+    return 2147483647; // INT default
+}
+
 function _fallbackByType(col, maxLen) {
     const t = String(col?.type || '').toUpperCase();
 
@@ -276,22 +235,14 @@ function _fallbackByType(col, maxLen) {
         const usedDigits = _randInt(Math.max(1, Math.ceil(capDigits * 0.2)), capDigits); // 20%..100% of capacity
         const low  = Math.pow(10, usedDigits - 1);
         const high = Math.min(cap, Math.pow(10, usedDigits) - 1);
-        let n = _randInt(low, Math.max(low, high));
-        if (Math.random() < 0.5) n = -n; // randomize sign except TINYINT (handled above) / BIT handled elsewhere
-        return clampIntForSqlType(t, n);
+        return _randInt(low, Math.max(low, high));
     }
 
-    // DECIMAL/NUMERIC/MONEY/SMALLMONEY/REAL/FLOAT
+    // DECIMAL/NUMERIC/MONEY/REAL/FLOAT
     if (/DECIMAL|NUMERIC|MONEY|SMALLMONEY|FLOAT|REAL/.test(t)) {
-        const rawPrec  = Number(col?.precision);
-        const rawScale = Number(col?.scale);
-        const impliedScale = t.includes('MONEY') ? 4 : 2;
-
-        // Clamp at changelog max: p<=19, s<=6
-        const prec  = Math.max(1, Math.min(19, Number.isFinite(rawPrec) ? rawPrec : 8));
-        const scale = Math.max(0, Math.min(6,  Number.isFinite(rawScale) ? rawScale : impliedScale));
-
-        const intDigitsAllowed = Math.max(1, Math.min(MAX_DEC19_6_INT_DIGITS, prec - scale));
+        const prec  = Math.max(1, Number(col?.precision) || 8);
+        const scale = Math.max(0, Number(col?.scale) || (t.includes('MONEY') ? 2 : 2));
+        const intDigitsAllowed = Math.max(1, prec - scale);
 
         // Choose digits used in 20%..100% ranges
         const usedInt  = _randInt(Math.max(1, Math.ceil(intDigitsAllowed * 0.2)), intDigitsAllowed);
@@ -301,18 +252,12 @@ function _fallbackByType(col, maxLen) {
         const intHigh = Math.pow(10, Math.max(1, usedInt)) - 1;
         const intPart = String(_randInt(intLow, intHigh));
 
-        if (usedFrac <= 0) {
-            let v = Number(intPart);
-            if (Math.random() < 0.5) v = -v; // randomize sign
-            return clampDecimal19_6(v);
-        }
+        if (usedFrac <= 0) return Number(intPart);
 
         const fracMax  = Math.pow(10, Math.min(9, usedFrac)) - 1; // keep sampling reasonable
         const fracPart = String(_randInt(0, Math.max(0, fracMax))).padStart(usedFrac, '0');
 
-        let v = Number(`${intPart}.${fracPart}`);
-        if (Math.random() < 0.5) v = -v; // randomize sign
-        return clampDecimal19_6(v);
+        return Number(`${intPart}.${fracPart}`);
     }
 
     // DATE/TIME types: leave behavior unchanged
@@ -330,21 +275,24 @@ function _fallbackByType(col, maxLen) {
     // Generic fallback string with 20%..100% length, hard-capped at 25
     return _cap(_randLetters(_randLenPercentOfMax(maxLen, 0.2, 25)));
 }
-
 function _titleCase(s) { s = String(s || ""); return s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s; }
+
 /** Convert keys to a display label. */
 function simpleEntityName(entityKey) {
     const seg = String(entityKey || "").split("_").pop();
     return _titleCase(seg || entityKey);
 }
 
+
 /** Combine name/type heuristics, clipped to column length. */
 function genFallbackForColumn(col) {
     const maxLen = _maxLenFromCol(col, 256);
+
     const byName = _fallbackByName(col, maxLen);
     if (byName != null) {
         return (typeof byName === 'string') ? byName.slice(0, maxLen) : byName;
     }
+
     const byType = _fallbackByType(col, maxLen);
     return (typeof byType === 'string') ? byType.slice(0, maxLen) : byType;
 }
@@ -381,14 +329,10 @@ function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent, 
         const isImmutable = !!col.immutable;
         const isRequired = !!col.required;
         const isSrvCreate = !!col.serverGeneratedOnCreate;
-        const t = String(col?.type || '').toUpperCase();
 
         // CSV overrides for UPDATE
         if (side === "update" && csvRow && csvHeadersLower && csvHeadersLower.includes(String(field).toLowerCase())) {
-            // try to coerce/normalize when numeric column
-            const raw = csvRow[field];
-            const normalized = coerceAndNormalizeForChangelog(col, raw);
-            body[field] = normalized;
+            body[field] = csvRow[field];
             continue;
         }
 
@@ -397,14 +341,13 @@ function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent, 
             continue;
         }
 
-        // Static always included (normalized if numeric)
+        // Static always included
         if (hasStatic) {
-            const val = col.staticValue;
-            body[field] = coerceAndNormalizeForChangelog(col, val);
+            body[field] = col.staticValue;
             continue;
         }
 
-        // Candidate value (regex → fallback), then normalize if numeric
+        // Candidate value (regex → fallback)
         let valueChosen = undefined;
         if (col.generatePatternRegex) {
             const maxLen = (Number(col.maxLength) || Number(col.length) || 256);
@@ -412,7 +355,6 @@ function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent, 
             if (r.ok) valueChosen = r.value;
         }
         if (valueChosen === undefined) valueChosen = genFallbackForColumn(col);
-        valueChosen = coerceAndNormalizeForChangelog(col, valueChosen);
 
         // CREATE: required are always included; not part of pool
         if (side === "create" && isRequired) {
@@ -427,7 +369,7 @@ function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent, 
         }
 
         // Otherwise, eligible for pool
-        pool.push({ field, value: valueChosen, type: t });
+        pool.push({ field, value: valueChosen });
     }
 
     // Select by percent
@@ -436,6 +378,7 @@ function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent, 
 
     return body;
 }
+
 
 function joinUrl(host, p) {
     const h = String(host || "").replace(/\/+$/, "");
@@ -550,7 +493,7 @@ function createExistingKeyPicker(updateSource) {
                 return pool.pop();
             case "random-with-reuse":
             default:
-                return pool[Math.floor(Math.random() * (pool.length))];
+                return pool[Math.floor(Math.random() * pool.length)];
         }
     };
 }
@@ -675,6 +618,7 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
             console.log(`QUEUED: ${totalCalls} total ${entryWord(totalCalls)} (${queuedParts.join(", ")})`);
             console.log("");
         }
+
 
         console.log("");
 

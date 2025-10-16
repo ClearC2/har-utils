@@ -11,10 +11,35 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const readline = require('readline');
-const { askNumberPrefill, askPrefill, askYesNoPrefill, ensureDirForFile, localTsYmdHms, percentile, refreshCompactJWT, shuffleInPlace, toCsvField, truncateUrl, tsForFile } = require('./build-har-common');
+const { askPrefill, ensureDirForFile, localTsYmdHms, percentile, refreshCompactJWT, shuffleInPlace, toCsvField, truncateUrl, tsForFile } = require('./build-har-common');
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 function ask(q) { return new Promise(res => rl.question(q, ans => res((ans ?? '').trim()))); }
+
+async function askNumberPrefill(label, programmedDefault, configValue) {
+    // Use runner's RL; show [default], prefill with config if provided.
+    const shownDefault = String(programmedDefault);
+    const prompt = `${label} [${shownDefault}]: `;
+    if (configValue !== undefined && configValue !== null && configValue !== '') {
+        // prefill buffer
+        rl.write(String(configValue));
+    }
+    const raw = await ask(prompt);
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < 0) return programmedDefault;
+    return n;
+}
+
+async function askYesNoPrefill(label, programmedDefaultBool, configYN) {
+    const programmedDefChar = programmedDefaultBool ? 'Y' : 'N';
+    const prompt = `${label} (y/N) [${programmedDefChar}]: `;
+    if (configYN === 'Y' || configYN === 'N') rl.write(configYN);
+    const a = (await ask(prompt)).toLowerCase();
+    if (!a) return programmedDefaultBool;
+    if (a === 'y' || a === 'yes') return true;
+    if (a === 'n' || a === 'no') return false;
+    return programmedDefaultBool;
+}
 
 
 /** Resolve run config path from CLI flag or default to 'run-har.config.json'. */
@@ -38,6 +63,26 @@ function saveConfig(fp, cfgObj) {
     fs.writeFileSync(fp, JSON.stringify(toSave, null, 2), 'utf8');
     console.log(`[ok] Saved defaults to ${fp}`);
 }
+
+
+/** Prompt with visible default and inline prefilled value pulled from config. */
+/** Current timestamp as ISO UTC string. */
+/** Compact timestamp for filenames (no colons, timezone Z). */
+
+
+/** Empirical percentile selection without interpolation. */
+
+/** Escape a string and wrap in quotes for CSV. */
+
+// ---------- base64url / JWT helpers ----------
+/** Base64url encode a UTF‑8 string using URL-safe alphabet and no padding. */
+
+
+
+
+
+/** Refresh an HS256 JWT (update exp and re-sign); pass-through for non-HS256 tokens. */
+
 
 // ---------- HAR parsing & heuristics ----------
 /** Extract HAR entries from log.entries or top-level entries array. */
@@ -81,6 +126,8 @@ function prepareQueue(entries) {
 
 
 /** === Global Stats CSV (header-or-append) === */
+
+
 const GLOBAL_CSV_COLUMNS = [
     'timestamp','run_title','avg_ms','min_ms','max_ms','p50_ms','p90_ms','p99_ms',
     'total_hars','inputs','threads_per_file','max_minutes','max_calls_per_thread',

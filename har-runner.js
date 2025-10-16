@@ -11,36 +11,12 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const readline = require('readline');
-const { askPrefill, ensureDirForFile, localTsYmdHms, percentile, refreshCompactJWT, shuffleInPlace, toCsvField, truncateUrl, tsForFile } = require('./build-har-common');
+const {ensureDirForFile, localTsYmdHms, percentile, refreshCompactJWT, shuffleInPlace, toCsvField, truncateUrl, tsForFile, makePrompts} = require('./build-har-common');
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-function ask(q) { return new Promise(res => rl.question(q, ans => res((ans ?? '').trim()))); }
-
-async function askNumberPrefill(label, programmedDefault, configValue) {
-    // Use runner's RL; show [default], prefill with config if provided.
-    const shownDefault = String(programmedDefault);
-    const prompt = `${label} [${shownDefault}]: `;
-    if (configValue !== undefined && configValue !== null && configValue !== '') {
-        // prefill buffer
-        rl.write(String(configValue));
-    }
-    const raw = await ask(prompt);
-    const n = parseInt(raw, 10);
-    if (!Number.isFinite(n) || n < 0) return programmedDefault;
-    return n;
-}
-
-async function askYesNoPrefill(label, programmedDefaultBool, configYN) {
-    const programmedDefChar = programmedDefaultBool ? 'Y' : 'N';
-    const prompt = `${label} (y/N) [${programmedDefChar}]: `;
-    if (configYN === 'Y' || configYN === 'N') rl.write(configYN);
-    const a = (await ask(prompt)).toLowerCase();
-    if (!a) return programmedDefaultBool;
-    if (a === 'y' || a === 'yes') return true;
-    if (a === 'n' || a === 'no') return false;
-    return programmedDefaultBool;
-}
-
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+// Bind a single, shared prompt API from common so there is exactly one ask().
+const { ask, askPrefill, askNumberPrefill, askYesNoPrefill } = makePrompts(rl);
+;
 
 /** Resolve run config path from CLI flag or default to 'run-har.config.json'. */
 const DEFAULT_CONFIG_PATH = (() => {

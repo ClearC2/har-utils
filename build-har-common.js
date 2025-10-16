@@ -403,7 +403,40 @@ function clampDecimal19_6(n) {
 }
 
 /* ================================ Exports ================================ */
-module.exports = {
+
+// ---- Unified prompt factory ----
+function makePrompts(rl) {
+    if (!rl || typeof rl.question !== 'function') throw new Error('makePrompts requires a readline interface');
+    const ask = (q) => new Promise(res => rl.question(q, ans => res((ans ?? '').trim())));
+
+    async function askPrefill(label, programmedDefault, configValue) {
+        const shownDefault = programmedDefault ?? '';
+        if (configValue !== undefined && configValue !== null && configValue !== '') rl.write(String(configValue));
+        const ans = await ask(`${label} [${shownDefault}]: `);
+        return ans === '' ? shownDefault : ans;
+    }
+
+    async function askNumberPrefill(label, programmedDefault, configValue) {
+        if (configValue !== undefined && configValue !== null && configValue !== '') rl.write(String(configValue));
+        const raw = await ask(`${label} [${String(programmedDefault)}]: `);
+        const n = parseInt(raw, 10);
+        return (!Number.isFinite(n) || n < 0) ? programmedDefault : n;
+    }
+
+    async function askYesNoPrefill(label, programmedDefaultBool, configYN) {
+        const defChar = programmedDefaultBool ? 'Y' : 'N';
+        if (configYN === 'Y' || configYN === 'N') rl.write(configYN);
+        const a = (await ask(`${label} (y/N) [${defChar}]: `)).toLowerCase();
+        if (!a) return programmedDefaultBool;
+        if (a === 'y' || a === 'yes') return true;
+        if (a === 'n' || a === 'no') return false;
+        return programmedDefaultBool;
+    }
+
+    return { ask, askPrefill, askNumberPrefill, askYesNoPrefill };
+}
+
+module.exports = { makePrompts, 
     CONFIG_PATH,
 
     // CLI
@@ -423,9 +456,11 @@ module.exports = {
     decode, formToObj, tryExtractJson,
     truncateUrl,
     percentile,
+    base64urlEncodeUtf8,
     clampIntForSqlType,
     askPrefill,
     shuffleInPlace,
+    signHS256,
     coerceAndNormalizeForChangelog,
     tsForFile,
     sqlLiteral,
@@ -433,11 +468,15 @@ module.exports = {
     _sqlIntCapForType,
     toCsvField,
     refreshCompactJWT,
+    base64urlDecodeToUtf8,
     ensureDirForFile,
     joinUrl,
+    base64urlEncodeBuf,
+    _titleCase,
     chooseByPercent,
     askExistingPathPrefill,
     localTsYmdHms,
+    clampDecimal19_6,
     askNumberPrefill,
     askYesNoPrefill};
 

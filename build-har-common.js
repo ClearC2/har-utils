@@ -6,7 +6,9 @@
 "use strict";
 
 const fs = require("fs");
+const path = require("path");
 const readline = require("readline");
+const crypto = require("crypto");
 
 
 /** Default config path used by tools that need a shared JSONC mapping file. */
@@ -142,6 +144,8 @@ function uniqueDatedFilename(base, ext) {
 }
 
 /* ====================== Generic JSON/HAR convenience ====================== */
+function truncateUrl(url) { return !url ? '' : (url.length > 75 ? url.slice(0,75) + '...' : url); }
+
 
 function decode(bufOrStr) {
     if (Buffer.isBuffer(bufOrStr)) return bufOrStr.toString();
@@ -173,8 +177,266 @@ function flattenToDotPaths(obj, prefix = "") {
 }
 function collectKeysDeep(obj) { return Object.keys(flattenToDotPaths(obj || {})); }
 
+function askPrefill(label, programmedDefault, configValue) {
+    const { rl, autoClose } = _ensureRl(null);
+    return new Promise(resolve => {
+        const prompt = `${label} [${programmedDefault}]: `;
+        rl.question(prompt, ans => {
+            const val = ans;
+            if (autoClose) rl.close();
+            if (val === '') return resolve(programmedDefault);
+            resolve(val);
+        });
+        if (configValue !== undefined && configValue !== null && configValue !== '') {
+            rl.write(String(configValue));
+        }
+    });
+}
+
+
+function askNumberPrefill(label, programmedDefault, configValue) {
+    // Mirrors the runner's UX: shows [default] hint and pre-fills with config value if present.
+    return askPrefill(label, String(programmedDefault), (configValue ?? '') === '' ? '' : String(configValue))
+        .then(raw => {
+            const n = parseInt(String(raw), 10);
+            if (!Number.isFinite(n) || n < 0) return programmedDefault;
+            return n;
+        });
+}
+
+async function askYesNoPrefill(label, programmedDefaultBool, configYN) {
+    // Mirrors the runner's UX: (y/N) with [Y] or [N] shown and optional prefill of 'Y'/'N'.
+    const programmedDefChar = programmedDefaultBool ? 'Y' : 'N';
+    const prompt = `${label} (y/N) [${programmedDefChar}]: `;
+    const { rl, autoClose } = _ensureRl(null);
+    return new Promise(resolve => {
+        rl.question(prompt, ans => {
+            const a = (ans ?? '').trim().toLowerCase();
+            if (autoClose) rl.close();
+            if (!a) return resolve(programmedDefaultBool);
+            if (a === 'y' || a === 'yes') return resolve(true);
+            if (a === 'n' || a === 'no') return resolve(false);
+            return resolve(programmedDefaultBool);
+        });
+        if (configYN === 'Y' || configYN === 'N') rl.write(configYN);
+    });
+}
+
+
+
+function localTsYmdHms(d = new Date()) {
+    const pad = n => String(n).padStart(2, '0');
+    return [
+        d.getFullYear(),
+        pad(d.getMonth() + 1),
+        pad(d.getDate())
+    ].join('-') + ' ' + [pad(d.getHours()), pad(d.getMinutes()), pad(d.getSeconds())].join(':');
+}
+function tsForFile() { return localTsYmdHms().replace(/[:-]/g, '').replace(/\.\d{3}Z$/, 'Z'); }
+
+function toCsvField(v) {
+    if (v === null || v === undefined) return '';
+    const s = String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function ensureDirForFile(fp) { fs.mkdirSync(path.dirname(fp), { recursive: true }); }
+
+function percentile(values, p) {
+    if (!values.length) return 0;
+    const sorted = [...values].sort((a,b)=>a-b);
+    const idx = Math.floor((p / 100) * sorted.length);
+    return sorted[Math.min(idx, sorted.length - 1)];
+}
+
+function base64urlEncodeUtf8(str) {
+    return Buffer.from(str, 'utf8').toString('base64').replace(/=/g, '').replace(/\+/g,'-').replace(/\//g,'_');
+}
+
+function base64urlEncodeBuf(buf) {
+    return Buffer.from(buf).toString('base64').replace(/=/g, '').replace(/\+/g,'-').replace(/\//g,'_');
+}
+
+function base64urlDecodeToUtf8(b64u) {
+    const padLen = (4 - (b64u.length % 4)) % 4;
+    const b64 = b64u.replace(/-/g,'+').replace(/_/g,'/') + '='.repeat(padLen);
+    return Buffer.from(b64, 'base64').toString('utf8');
+}
+
+function signHS256(input, secret) {
+    return base64urlEncodeBuf(crypto.createHmac('sha256', secret).update(input).digest());
+}
+
+function refreshCompactJWT(jwt, secret) {
+    try {
+        const parts = jwt.split('.');
+        if (parts.length !== 3 || !secret) return { ok: false, token: jwt };
+        const header = JSON.parse(base64urlDecodeToUtf8(parts[0]));
+        if (String(header.alg).toUpperCase() !== 'HS256') return { ok: false, token: jwt };
+        const payload = JSON.parse(base64urlDecodeToUtf8(parts[1]));
+        const nowSec = Math.floor(Date.now()/1000);
+        const newHeader = { ...header, alg: 'HS256', typ: 'JWT' };
+        //const newPayload = { ...payload, iat: nowSec, exp: nowSec + THIRTY_DAYS_S };
+        const newPayload = { ...payload, exp: nowSec + (30 * 24 * 60 * 60 ) };
+        const h = base64urlEncodeUtf8(JSON.stringify(newHeader));
+        const p = base64urlEncodeUtf8(JSON.stringify(newPayload));
+        const s = signHS256(`${h}.${p}`, secret);
+        return { ok: true, token: `${h}.${p}.${s}`, payload: newPayload };
+    } catch { return { ok: false, token: jwt }; }
+}
+
+function joinUrl(host, p) {
+    const h = String(host || "").replace(/\/+$/, "");
+    const s = String(p || "").replace(/^\/+/, "");
+    return `${h}/${s}`;
+}
+
+function chooseByPercent(arr, percent) {
+    const len = Array.isArray(arr) ? arr.length : 0;
+    const p = Math.max(0, Math.min(100, Number(percent) || 0));
+    const n = Math.max(0, Math.min(len, Math.round(len * (p / 100))));
+    if (n === 0) return [];
+    const copy = arr.slice();
+    shuffleInPlace(copy);
+    return copy.slice(0, n);
+}
+
+function _sqlIntCapForType(t) {
+    const T = String(t || '').toUpperCase();
+    if (T.includes('TINYINT'))   return 255;
+    if (T.includes('SMALLINT'))  return 32767;                // positive cap
+    if (T.includes('BIGINT'))    return 9007199254740991;     // Number.MAX_SAFE_INTEGER
+    return 2147483647; // INT default
+}
+
+function clampIntForSqlType(t, n) {
+    if (n == null || n === "") return n;
+    let x = Number(n);
+    if (!Number.isFinite(x)) x = 0;
+    // Use signed ranges; keep above/below zero reasonable
+    const T = String(t || '').toUpperCase();
+    if (T.includes('TINYINT'))   return Math.max(0, Math.min(255, Math.round(x)));
+    if (T.includes('SMALLINT'))  return Math.max(-32768, Math.min(32767, Math.round(x)));
+    if (T.includes('INT'))       return Math.max(-2147483648, Math.min(2147483647, Math.round(x)));
+    if (T.includes('BIGINT')) {
+        const MAX = 9007199254740991; // JS safe
+        const MIN = -9007199254740991;
+        return Math.max(MIN, Math.min(MAX, Math.trunc(x)));
+    }
+    return Math.trunc(x);
+}
+
+function coerceAndNormalizeForChangelog(col, val) {
+    const t = String(col?.type || '').toUpperCase();
+    if (val == null) return val;
+
+    // If it's clearly numeric-like, coerce
+    const looksNumeric = (v) => (typeof v === "number") ||
+        (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v)));
+
+    if (/DECIMAL|NUMERIC|MONEY|SMALLMONEY/.test(t)) {
+        const n = looksNumeric(val) ? Number(val) : 0;
+        return clampDecimal19_6(n);
+    }
+    if (/(^|[^A-Z])(BIGINT|INT|SMALLINT|TINYINT)([^A-Z]|$)/.test(t)) {
+        const n = looksNumeric(val) ? Number(val) : 0;
+        return clampIntForSqlType(t, n);
+    }
+    if (/FLOAT|REAL/.test(t)) {
+        let n = looksNumeric(val) ? Number(val) : 0;
+        if (!Number.isFinite(n)) n = 0;
+        // Keep magnitude sane; FLOAT in SQL Server allows big exponents but don't go wild
+        if (Math.abs(n) > 1e308) n = (n < 0 ? -1 : 1) * 1e308;
+        return n;
+    }
+    // non-numeric → unchanged (strings, dates, etc.)
+    return val;
+}
+
+function sqlLiteral(v) {
+    if (v === null || v === undefined) return "NULL";
+    if (typeof v === "number") return String(v);
+    if (typeof v === "boolean") return v ? "1" : "0";
+    return `'${String(v).replace(/'/g, "''")}'`;
+}
+
+function _titleCase(s) { s = String(s || ""); return s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s; }
+
+function simpleEntityName(entityKey) {
+    const seg = String(entityKey || "").split("_").pop();
+    return _titleCase(seg || entityKey);
+}
+
+function shuffleInPlace(arr, rng = Math.random) {
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+}
+
+async function askExistingPathPrefill(rl, label, prefill) {
+    const lbl = label.endsWith(':') ? label : `${label}:`;
+    while (true) {
+        const p = await askInlinePrefilled(rl, lbl, prefill || '');
+        if (p && fs.existsSync(p)) return p;
+        console.log(p ? `File not found: ${p}` : 'Please enter a file path.');
+    }
+}
+
+const MAX_DEC19_6_ABS = 9999999999999.999999;
+function clampDecimal19_6(n) {
+    if (n == null || n === "") return n;
+    let x = Number(n);
+    if (!Number.isFinite(x)) return 0;
+    // round to 6 fractional digits
+    x = Math.round(x * 1e6) / 1e6;
+    if (x >  MAX_DEC19_6_ABS) return MAX_DEC19_6_ABS;
+    if (x < -MAX_DEC19_6_ABS) return -MAX_DEC19_6_ABS;
+    // also ensure integer digits <= 13 (covers 10^13 - 1)
+    const abs = Math.abs(x);
+    if (abs >= 1e13) {
+        const sign = x < 0 ? -1 : 1;
+        return sign * (1e13 - 1e-6); // 9999999999999.999999
+    }
+    return x;
+}
+
 /* ================================ Exports ================================ */
-module.exports = {
+
+// ---- Unified prompt factory ----
+function makePrompts(rl) {
+    if (!rl || typeof rl.question !== 'function') throw new Error('makePrompts requires a readline interface');
+    const ask = (q) => new Promise(res => rl.question(q, ans => res((ans ?? '').trim())));
+
+    async function askPrefill(label, programmedDefault, configValue) {
+        const shownDefault = programmedDefault ?? '';
+        if (configValue !== undefined && configValue !== null && configValue !== '') rl.write(String(configValue));
+        const ans = await ask(`${label} [${shownDefault}]: `);
+        return ans === '' ? shownDefault : ans;
+    }
+
+    async function askNumberPrefill(label, programmedDefault, configValue) {
+        if (configValue !== undefined && configValue !== null && configValue !== '') rl.write(String(configValue));
+        const raw = await ask(`${label} [${String(programmedDefault)}]: `);
+        const n = parseInt(raw, 10);
+        return (!Number.isFinite(n) || n < 0) ? programmedDefault : n;
+    }
+
+    async function askYesNoPrefill(label, programmedDefaultBool, configYN) {
+        const defChar = programmedDefaultBool ? 'Y' : 'N';
+        if (configYN === 'Y' || configYN === 'N') rl.write(configYN);
+        const a = (await ask(`${label} (y/N) [${defChar}]: `)).toLowerCase();
+        if (!a) return programmedDefaultBool;
+        if (a === 'y' || a === 'yes') return true;
+        if (a === 'n' || a === 'no') return false;
+        return programmedDefaultBool;
+    }
+
+    return { ask, askPrefill, askNumberPrefill, askYesNoPrefill };
+}
+
+module.exports = { makePrompts, 
     CONFIG_PATH,
 
     // CLI
@@ -192,5 +454,29 @@ module.exports = {
 
     // Generic helpers
     decode, formToObj, tryExtractJson,
+    truncateUrl,
+    percentile,
+    base64urlEncodeUtf8,
+    clampIntForSqlType,
+    askPrefill,
+    shuffleInPlace,
+    signHS256,
+    coerceAndNormalizeForChangelog,
+    tsForFile,
+    sqlLiteral,
+    simpleEntityName,
+    _sqlIntCapForType,
+    toCsvField,
+    refreshCompactJWT,
+    base64urlDecodeToUtf8,
+    ensureDirForFile,
+    joinUrl,
+    base64urlEncodeBuf,
+    _titleCase,
+    chooseByPercent,
+    askExistingPathPrefill,
+    localTsYmdHms,
+    clampDecimal19_6,
+    askNumberPrefill,
+    askYesNoPrefill};
 
-};

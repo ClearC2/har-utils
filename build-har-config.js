@@ -25,7 +25,8 @@ const {
 
     collectKeysDeep, decode, formToObj, tryExtractJson,
 
-} = require('./build-har-common');
+
+    askExistingPathPrefill} = require('./build-har-common');
 
 
 
@@ -316,14 +317,7 @@ async function pickEntityWithNewFlag(rl, cfg) {
 
 
 /** Prompt repeatedly until an existing file path is provided; input prefilled with a suggestion. */
-async function askExistingPathPrefill(rl, label, prefill) {
-    const lbl = label.endsWith(':') ? label : `${label}:`;
-    while (true) {
-        const p = await askInlinePrefilled(rl, lbl, prefill || '');
-        if (p && fs.existsSync(p)) return p;
-        console.log(p ? `File not found: ${p}` : 'Please enter a file path.');
-    }
-}
+
 
 
 /** Require initial SQL CREATE TABLE for schema discovery when schema is missing. */

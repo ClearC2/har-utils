@@ -6,29 +6,21 @@
  * and a review loop for TABLE/HEADERS/SUMMARY before saving the configuration.
  */
 
-
 const fs = require('fs');
 const { URL } = require('url');
 
 const {
     CONFIG_PATH,
 
-
     rlCreate,  askWithDefault, askYesNo, askInlinePrefilled,
-
 
     loadJsonc, saveJsonc,
 
-
     listEntitiesCaseInsensitive, canonicalEntityKey,
-
 
     collectKeysDeep, decode, formToObj, tryExtractJson,
 
-
     askExistingPathPrefill} = require('./build-har-common');
-
-
 
 /** Default banner text embedded in the saved JSONC config file. */
 const DEFAULT_HEADER = `/*
@@ -45,9 +37,8 @@ PURPOSE
    The HAR generator reads this config to build and replay realistic API
    requests for testing and performance analysis.
 ------------------------------------------------------------------------------
-*/`;
-
-
+*/
+`;
 
 /** Render an ASCII table with widths sized to headers and rows. */
 function printTable(headers, rows) {
@@ -65,7 +56,6 @@ function printTable(headers, rows) {
     for (const r of rows) console.log('│ ' + r.map((c, i) => pad(c, widths[i])).join(' │ ') + ' │');
     console.log(end);
 }
-
 
 /** Remove null/undefined static values from schema rows to avoid saving meaningless entries. */
 function cleanNullStatics(cfg) {
@@ -88,7 +78,6 @@ function saveConfigClean(cfg) {
     saveJsonc(CONFIG_PATH, cfg, DEFAULT_HEADER);
 }
 
-
 /** Program entry: prompts, entity pick, SQL/HAR stages, then the review loop. */
 (async function main() {
     const rl = rlCreate();
@@ -102,7 +91,6 @@ function saveConfigClean(cfg) {
         let cfg = loadJsonc(CONFIG_PATH) || {};
         cfg = cleanNullStatics(cfg);
         cfg.sourcesLastUsed = cfg.sourcesLastUsed || { sqlPath: '', harPath: '' };
-
 
         const { key: entityKey, isNew } = await pickEntityWithNewFlag(rl, cfg);
         const e = upsertEntity(cfg, entityKey);
@@ -135,7 +123,6 @@ function saveConfigClean(cfg) {
 
         console.log(`\nModifying entity ${entityKey}...\n`);
 
-
         const hadSchema =
             Array.isArray(e.schema) &&
             e.schema.some(col => col && typeof col === 'object' && Object.keys(col).length > 0);
@@ -157,7 +144,6 @@ function saveConfigClean(cfg) {
 
             }
         }
-
 
         {
             const ent = cfg.entities[entityKey];
@@ -186,7 +172,6 @@ function saveConfigClean(cfg) {
             }
         }
 
-
         console.log('');
         await reviewLoop(rl, cfg, entityKey);
 
@@ -195,7 +180,6 @@ function saveConfigClean(cfg) {
         process.exit(1);
     }
 })();
-
 
 /** Print preview + summary and route to TABLE/HEADERS/SUMMARY editors or save+exit. */
 async function reviewLoop(rl, cfg, entityKey) {
@@ -225,8 +209,13 @@ async function reviewLoop(rl, cfg, entityKey) {
     }
 }
 
-
-/** Ensure entity exists, normalize structure, migrate legacy wrapper fields, ensure headers arrays. */
+/**
+ * upsertEntity — ensure an entity exists, migrate wrapper fields if needed, and normalize routes/payload/schema.
+ *
+ * @param {any} cfg - input parameter.
+ * @param {any} key - input parameter.
+ * @returns {any} Result.
+ */
 function upsertEntity(cfg, key) {
     cfg.entities = cfg.entities || {};
     if (!cfg.entities[key]) {
@@ -252,7 +241,6 @@ function upsertEntity(cfg, key) {
             if (!('requiredKeys' in obj)) obj.requiredKeys = [];
         }
 
-
         cfg.entities[key].routes = cfg.entities[key].routes || { create: {}, update: {} };
         cfg.entities[key].routes.create = cfg.entities[key].routes.create || {};
         cfg.entities[key].routes.update = cfg.entities[key].routes.update || {};
@@ -260,11 +248,6 @@ function upsertEntity(cfg, key) {
         if (!("headers" in cfg.entities[key].routes.update)) cfg.entities[key].routes.update.headers = [];
         cfg.entities[key].sources = cfg.entities[key].sources || { sqlPath: '', harPath: '' };
 
-        cfg.entities[key].routes = cfg.entities[key].routes || { create: {}, update: {} };
-        cfg.entities[key].routes.create = cfg.entities[key].routes.create || {};
-        cfg.entities[key].routes.update = cfg.entities[key].routes.update || {};
-        if (!("headers" in cfg.entities[key].routes.create)) cfg.entities[key].routes.create.headers = [];
-        if (!("headers" in cfg.entities[key].routes.update)) cfg.entities[key].routes.update.headers = [];
     }
     return cfg.entities[key];
 }
@@ -285,7 +268,6 @@ async function pickEntityWithNewFlag(rl, cfg) {
         const prompt = items.length
             ? 'Existing or New Entity name/number (or Q to quit): '
             : 'Enter new entity name (or Q to quit): ';
-
 
         const input = (await askWithDefault(rl, prompt, items[0] || '')).trim();
 
@@ -315,10 +297,7 @@ async function pickEntityWithNewFlag(rl, cfg) {
     }
 }
 
-
 /** Prompt repeatedly until an existing file path is provided; input prefilled with a suggestion. */
-
-
 
 /** Require initial SQL CREATE TABLE for schema discovery when schema is missing. */
 async function requireSql(rl, cfg, entityKey) {
@@ -356,7 +335,6 @@ async function optionalSqlMerge(rl, cfg, entityKey) {
 }
 /** Attempt to parse SQL; on error return null for a gentle retry loop. */
 function tryParseSql(sql) { try { return parseSqlCreate(sql); } catch(e){ console.log('SQL parse error:', e?.message||e); return null; } }
-
 
 /** Parse CREATE TABLE: extract columns, sizes/precision, and primary keys (inline/table-level). */
 function parseSqlCreate(sql) {
@@ -498,7 +476,6 @@ function mergeSchema(cfg, entityKey, parsed, { mode }) {
     }
 }
 
-
 /** Gather host, paths, methods, slug-to-column mapping, and JSON payload wrappers for both sides. */
 async function summaryPromptsOnce(rl, e, entityKey) {
     const routes = e.routes || (e.routes = { host: null, create:{}, update:{} });
@@ -525,7 +502,6 @@ async function summaryPromptsOnce(rl, e, entityKey) {
     routes.update.path = await askInlinePrefilled(
         rl, `(${entityKey}) UPDATE path:`, routes.update.path || `/api/${entityKey.toLowerCase()}/id/:id`
     );
-
 
     const currentIdParam = (routes.update.params && routes.update.params[0]) || { name: 'id', column: '' };
     let defaultIdColumn = currentIdParam.column || bestPkOrBlank(e);
@@ -565,7 +541,6 @@ async function promptForPkColumn(rl, schema, entityKey) {
     return cols[0];
 }
 
-
 /** Create example mapping of path slugs (e.g., :id) to configured params. */
 function getSlugFillsForPath(path, paramsArr) {
     const slugs = String(path || '').match(/:([A-Za-z0-9_]+)/g) || [];
@@ -578,6 +553,13 @@ function getSlugFillsForPath(path, paramsArr) {
     return map;
 }
 
+/**
+ * printSummary — utility helper; see implementation for details.
+ *
+ * @param {any} e - input parameter.
+ * @param {any} entityKey - input parameter.
+ * @returns {any} Result.
+ */
 function printSummary(e, entityKey) {
     const host = e?.routes?.host || '';
     const cm = (e?.routes?.create?.method || 'POST').toUpperCase();
@@ -609,13 +591,25 @@ function printSummary(e, entityKey) {
 
 }
 
+/**
+ * printHeaders — utility helper; see implementation for details.
+ *
+ * @param {any} entity - input parameter.
+ * @param {any} entityKey - input parameter.
+ * @returns {any} Result.
+ */
 function printHeaders(entity, entityKey) {
     try {
 
         const ch = sanitizeHeaders(entity?.routes?.create?.headers);
         const uh = sanitizeHeaders(entity?.routes?.update?.headers);
 
-
+        /**
+ * sig — utility helper; see implementation for details.
+ *
+ * @param {any} arr - input parameter.
+ * @returns {any} Result.
+ */
         const sig = (arr) => {
             const pairs = [];
             for (const h of (Array.isArray(arr) ? arr : [])) {
@@ -629,7 +623,6 @@ function printHeaders(entity, entityKey) {
         };
 
         const same = sig(ch) === sig(uh);
-
 
         const rows = (arr) => (arr || []).map((h, i) => [String(i + 1), h.name, h.value]);
 
@@ -648,10 +641,16 @@ function printHeaders(entity, entityKey) {
     }
 }
 
-
+/**
+ * harFlow — utility helper; see implementation for details.
+ *
+ * @param {any} rl - input parameter.
+ * @param {any} cfg - input parameter.
+ * @param {any} entityKey - input parameter.
+ * @returns {any} Result.
+ */
 async function harFlow(rl, cfg, entityKey) {
     const ent = cfg.entities[entityKey];
-
 
     const prefillHar = (ent.sources?.harPath || cfg.sourcesLastUsed?.harPath || '');
     const harPath = await askExistingPathPrefill(rl, `(${entityKey}) Path to sample HAR file`, prefillHar);
@@ -660,14 +659,12 @@ async function harFlow(rl, cfg, entityKey) {
 
     const har = loadHar(harPath);
 
-
     const entries = harvestEntries(har);
     const summary = harSummary(entries);
 
     const hostChoice   = await pickHostRequireChoice(rl, summary.hosts, entityKey);
     const createChoice = await pickRouteRequireChoice(rl, summary.routesByMethodPath['POST'] || [], `CREATE (POST) — ${entityKey}`);
     const updateChoice = await pickRouteRequireChoice(rl, summary.routesByMethodPath['POST'] || [], `UPDATE (POST) — ${entityKey}`);
-
 
     ent.routes = ent.routes || { host: null, create: {}, update: {} };
     ent.routes.host = hostChoice;
@@ -677,7 +674,6 @@ async function harFlow(rl, cfg, entityKey) {
     ent.routes.create.path   = createChoice.path;
     ent.routes.update.method = 'POST';
     ent.routes.update.path   = templateUpdatePathForDisplay(updateChoice.path);
-
 
     const oneCreate = findMostRecentMatching(entries, 'POST', createChoice.path);
     const oneUpdate = findMostRecentMatching(entries, 'POST', updateChoice.path);
@@ -692,8 +688,6 @@ async function harFlow(rl, cfg, entityKey) {
         suggestUpdateIdParam(ent);
         biasServerGeneratedFromIdParam(ent);
     }
-
-
 
     (function applyHeadersFromSelectedEntries() {
 
@@ -714,7 +708,12 @@ async function harFlow(rl, cfg, entityKey) {
     })();
 }
 
-
+/**
+ * loadHar — utility helper; see implementation for details.
+ *
+ * @param {any} path - input parameter.
+ * @returns {any} Result.
+ */
 function loadHar(path) {
     try {
         const raw = fs.readFileSync(path, 'utf8');
@@ -724,6 +723,12 @@ function loadHar(path) {
         throw new Error(`Failed to load HAR: ${e.message || e}`);
     }
 }
+/**
+ * harvestEntries — utility helper; see implementation for details.
+ *
+ * @param {any} har - input parameter.
+ * @returns {any} Result.
+ */
 function harvestEntries(har) {
     const entries = (har?.log?.entries || []).map(e => {
         const req = e.request || {};
@@ -743,6 +748,12 @@ function harvestEntries(har) {
     });
     return entries.filter(e => e.method && e.path);
 }
+/**
+ * harSummary — utility helper; see implementation for details.
+ *
+ * @param {any} entries - input parameter.
+ * @returns {any} Result.
+ */
 function harSummary(entries) {
     const hosts = new Set();
     const routesByMethodPath = {};
@@ -757,6 +768,14 @@ function harSummary(entries) {
     }
     return { hosts: Array.from(hosts), routesByMethodPath };
 }
+/**
+ * pickHostRequireChoice — utility helper; see implementation for details.
+ *
+ * @param {any} rl - input parameter.
+ * @param {any} hosts - input parameter.
+ * @param {any} entityKey - input parameter.
+ * @returns {any} Result.
+ */
 async function pickHostRequireChoice(rl, hosts, entityKey) {
     if (!hosts.length) throw new Error(`No hosts found in HAR for ${entityKey}.`);
     if (hosts.length === 1) return hosts[0];
@@ -766,6 +785,14 @@ async function pickHostRequireChoice(rl, hosts, entityKey) {
     if (idx < 0 || idx >= hosts.length) return hosts[0];
     return hosts[idx];
 }
+/**
+ * pickRouteRequireChoice — utility helper; see implementation for details.
+ *
+ * @param {any} rl - input parameter.
+ * @param {any} routes - input parameter.
+ * @param {any} label - input parameter.
+ * @returns {any} Result.
+ */
 async function pickRouteRequireChoice(rl, routes, label) {
     if (!routes.length) throw new Error(`No ${label} routes found.`);
     if (routes.length === 1) return routes[0];
@@ -775,6 +802,14 @@ async function pickRouteRequireChoice(rl, routes, label) {
     if (idx < 0 || idx >= routes.length) return routes[0];
     return routes[idx];
 }
+/**
+ * findMostRecentMatching — utility helper; see implementation for details.
+ *
+ * @param {any} entries - input parameter.
+ * @param {any} method - input parameter.
+ * @param {any} path - input parameter.
+ * @returns {any} Result.
+ */
 function findMostRecentMatching(entries, method, path) {
     const m = String(method || '').toUpperCase();
     const arr = entries.filter(e => e.method === m && e.path === path);
@@ -783,7 +818,12 @@ function findMostRecentMatching(entries, method, path) {
     return arr[0];
 }
 
-
+/**
+ * sanitizeHeaders — utility helper; see implementation for details.
+ *
+ * @param {any} arr - input parameter.
+ * @returns {any} Result.
+ */
 function sanitizeHeaders(arr) {
     if (!Array.isArray(arr)) return [];
     const seen = new Map();
@@ -796,7 +836,6 @@ function sanitizeHeaders(arr) {
         if (name === 'authorization') continue;
         if (name === 'content-length') continue;
 
-
         let value = String(h.value ?? '').trim().replace(/\s+/g, ' ');
         if ((value.startsWith('"') && value.endsWith('"')) ||
             (value.startsWith("'") && value.endsWith("'"))) {
@@ -806,15 +845,20 @@ function sanitizeHeaders(arr) {
         seen.set(name, { name, value });
     }
 
-
     return Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-
+/**
+ * analyzeSingleEntry — utility helper; see implementation for details.
+ *
+ * @param {any} entry - input parameter.
+ * @param {any} entity - input parameter.
+ * @param {any} side - input parameter.
+ * @returns {any} Result.
+ */
 function analyzeSingleEntry(entry, entity, side ) {
     const reqJson = parseReqBody(entry.req);
     const resJson = parseResBody(entry.res);
-
 
     const wrapperPath = findWrapper(reqJson, { returnPath: true });
     const unwrappedReq = wrapperPath ? unwrapByPath(reqJson, wrapperPath) : reqJson;
@@ -837,6 +881,13 @@ function analyzeSingleEntry(entry, entity, side ) {
         exampleRes: resJson || {}
     };
 
+    /**
+ * unwrapByPath — utility helper; see implementation for details.
+ *
+ * @param {any} obj - input parameter.
+ * @param {any} path - input parameter.
+ * @returns {any} Result.
+ */
     function unwrapByPath(obj, path) {
         if (!obj || typeof obj !== 'object') return obj;
         const parts = String(path).split('.').filter(Boolean);
@@ -848,6 +899,12 @@ function analyzeSingleEntry(entry, entity, side ) {
         return cur ?? obj;
     }
 }
+/**
+ * parseReqBody — utility helper; see implementation for details.
+ *
+ * @param {any} req - input parameter.
+ * @returns {any} Result.
+ */
 function parseReqBody(req) {
     const pd = req?.postData || {};
     if (!pd || !pd.text) return {};
@@ -860,6 +917,12 @@ function parseReqBody(req) {
     }
     return {};
 }
+/**
+ * parseResBody — utility helper; see implementation for details.
+ *
+ * @param {any} res - input parameter.
+ * @returns {any} Result.
+ */
 function parseResBody(res) {
     const c = res?.content || {};
     if (!c || !c.text) return {};
@@ -870,6 +933,13 @@ function parseResBody(res) {
 
 // Returns either the top-level wrapper key or a dotted path if nested.
 // If options.returnPath is true, returns a dotted path (e.g., "data.item") when nested is found.
+/**
+ * findWrapper — utility helper; see implementation for details.
+ *
+ * @param {any} obj - input parameter.
+ * @param {any} options - input parameter.
+ * @returns {any} Result.
+ */
 function findWrapper(obj, options) {
     const returnPath = !!(options && options.returnPath);
 
@@ -956,16 +1026,24 @@ function findWrapper(obj, options) {
     return null;
 }
 
-
-
-
-
-
-
+/**
+ * inferServerGeneratedFields — utility helper; see implementation for details.
+ *
+ * @param {any} entity - input parameter.
+ * @param {any} analysis - input parameter.
+ * @returns {any} Result.
+ */
 function inferServerGeneratedFields(entity, analysis) {
     const reqSet = new Set((analysis.reqDeepKeys || []).map(k => String(k).toLowerCase()));
     const resSet = new Set((analysis.resDeepKeys || []).map(k => String(k).toLowerCase()));
 
+    /**
+ * getCaseInsensitive — utility helper; see implementation for details.
+ *
+ * @param {any} obj - input parameter.
+ * @param {any} key - input parameter.
+ * @returns {any} Result.
+ */
     const getCaseInsensitive = (obj, key) => {
         if (!obj || !key) return undefined;
         if (Object.prototype.hasOwnProperty.call(obj, key)) return obj[key];
@@ -975,12 +1053,24 @@ function inferServerGeneratedFields(entity, analysis) {
         }
         return undefined;
     };
+    /**
+ * isNonEmptyEvidence — utility helper; see implementation for details.
+ *
+ * @param {any} v - input parameter.
+ * @returns {any} Result.
+ */
     const isNonEmptyEvidence = (v) => {
         if (v == null) return false;
         if (typeof v === 'string' && v.trim() === '') return false;
         return v !== 0;
 
     };
+    /**
+ * nameLooksStamped — utility helper; see implementation for details.
+ *
+ * @param {any} lowerName - input parameter.
+ * @returns {any} Result.
+ */
     const nameLooksStamped = (lowerName) => {
         return (
             lowerName.startsWith('created') ||
@@ -1023,6 +1113,14 @@ function inferServerGeneratedFields(entity, analysis) {
         }
     }
 }
+/**
+ * fillMappingsFromKeysDeep — utility helper; see implementation for details.
+ *
+ * @param {any} schema - input parameter.
+ * @param {any} analysis - input parameter.
+ * @param {any} side - input parameter.
+ * @returns {any} Result.
+ */
 function fillMappingsFromKeysDeep(schema, analysis, side) {
 
     const reqLeaves = new Set((analysis.reqKeys || []).map(k => String(k).toLowerCase()));
@@ -1030,7 +1128,6 @@ function fillMappingsFromKeysDeep(schema, analysis, side) {
 
     for (const col of schema) {
         const nameLower = String(col.name || '').toLowerCase();
-
 
         let match = exactLeafMatch(nameLower, reqLeaves);
         if (!match) match = exactLeafMatch(nameLower, resLeaves);
@@ -1043,6 +1140,13 @@ function fillMappingsFromKeysDeep(schema, analysis, side) {
     }
 }
 
+/**
+ * exactLeafMatch — utility helper; see implementation for details.
+ *
+ * @param {any} colNameLower - input parameter.
+ * @param {any} leafSet - input parameter.
+ * @returns {any} Result.
+ */
 function exactLeafMatch(colNameLower, leafSet) {
     if (!leafSet || !leafSet.size) return '';
 
@@ -1054,6 +1158,12 @@ function exactLeafMatch(colNameLower, leafSet) {
     }
     return '';
 }
+/**
+ * templateUpdatePathForDisplay — utility helper; see implementation for details.
+ *
+ * @param {any} path - input parameter.
+ * @returns {any} Result.
+ */
 function templateUpdatePathForDisplay(path) {
     const segs = String(path || '').split('/').filter(Boolean);
     if (segs.length >= 4 && segs[segs.length-2].toLowerCase() === 'id') {
@@ -1062,6 +1172,12 @@ function templateUpdatePathForDisplay(path) {
     }
     return path || '';
 }
+/**
+ * suggestUpdateIdParam — utility helper; see implementation for details.
+ *
+ * @param {any} entity - input parameter.
+ * @returns {any} Result.
+ */
 function suggestUpdateIdParam(entity) {
     const schema = entity?.schema || [];
     const pkCol = schema.find(c => c.isPk)?.name || '';
@@ -1071,6 +1187,12 @@ function suggestUpdateIdParam(entity) {
     const chosen = idParam.column || pkCol || '';
     entity.routes.update.params = [{ name: 'id', column: chosen }];
 }
+/**
+ * biasServerGeneratedFromIdParam — utility helper; see implementation for details.
+ *
+ * @param {any} entity - input parameter.
+ * @returns {any} Result.
+ */
 function biasServerGeneratedFromIdParam(entity) {
     const idParam = entity?.routes?.update?.params?.[0];
     if (!idParam) return;
@@ -1080,28 +1202,27 @@ function biasServerGeneratedFromIdParam(entity) {
     col.immutable = true;
 }
 
-
-
-
-
-
-
+/**
+ * rememberSourcePaths — utility helper; see implementation for details.
+ *
+ * @param {any} cfg - input parameter.
+ * @param {any} entityKey - input parameter.
+ * @param {any} paths - input parameter.
+ * @returns {any} Result.
+ */
 function rememberSourcePaths(cfg, entityKey, paths) {
     if (!cfg || !entityKey || !paths || typeof paths !== 'object') return;
-
 
     cfg.entities = cfg.entities || {};
     const ent = cfg.entities[entityKey] || (cfg.entities[entityKey] = {});
     ent.sources = ent.sources || { sqlPath: '', harPath: '' };
     cfg.sourcesLastUsed = cfg.sourcesLastUsed || { sqlPath: '', harPath: '' };
 
-
     if (paths.sqlPath != null && String(paths.sqlPath).trim() !== '') {
         const p = String(paths.sqlPath).trim();
         ent.sources.sqlPath = p;
         cfg.sourcesLastUsed.sqlPath = p;
     }
-
 
     if (paths.harPath != null && String(paths.harPath).trim() !== '') {
         const p = String(paths.harPath).trim();
@@ -1110,9 +1231,14 @@ function rememberSourcePaths(cfg, entityKey, paths) {
     }
 }
 
-
-
-
+/**
+ * headersEditor — utility helper; see implementation for details.
+ *
+ * @param {any} rl - input parameter.
+ * @param {any} cfg - input parameter.
+ * @param {any} entityKey - input parameter.
+ * @returns {any} Result.
+ */
 async function headersEditor(rl, cfg, entityKey) {
     const ent = cfg.entities[entityKey];
     ent.routes = ent.routes || {create: {headers: []}, update: {headers: []}};
@@ -1181,7 +1307,6 @@ async function headersEditor(rl, cfg, entityKey) {
             continue;
         }
 
-
         let idx = -1;
         if (/^\d+$/.test(line)) {
             idx = parseInt(line, 10) - 1;
@@ -1202,18 +1327,24 @@ async function headersEditor(rl, cfg, entityKey) {
     }
 }
 
-
-
-
-
-
-
-
+/**
+ * tableEditor — utility helper; see implementation for details.
+ *
+ * @param {any} rl - input parameter.
+ * @param {any} cfg - input parameter.
+ * @param {any} entityKey - input parameter.
+ * @returns {any} Result.
+ */
 async function tableEditor(rl, cfg, entityKey) {
     const entity = cfg.entities[entityKey];
     if (!entity.schema) entity.schema = [];
 
-
+    /**
+ * _nameLooks — utility helper; see implementation for details.
+ *
+ * @param {any} name - input parameter.
+ * @returns {any} Result.
+ */
     const _nameLooks = (name) => {
         const n = String(name || '').toLowerCase();
         return {
@@ -1223,6 +1354,12 @@ async function tableEditor(rl, cfg, entityKey) {
             state:  n.includes('state'),
         };
     };
+    /**
+ * _regexSuggestionForName — utility helper; see implementation for details.
+ *
+ * @param {any} name - input parameter.
+ * @returns {any} Result.
+ */
     const _regexSuggestionForName = (name) => {
         const t = _nameLooks(name);
         if (t.email) return '^address@[a-z]{4,10}\\.(com|net|org)$';
@@ -1231,6 +1368,15 @@ async function tableEditor(rl, cfg, entityKey) {
         if (t.state) return '^(?:A[LKSZ]|C[AOT]|D[CE]|FL|GA|HI|I[ADLN]|K[SY]|LA|M[ADEHINOPST]|N[CDEHJMVY]|O[HKR]|P[AR]|RI|S[CD]|T[NX]|UT|V[AIT]|W[AIVY])$';
         return '';
     };
+    /**
+ * _isDuplicate — utility helper; see implementation for details.
+ *
+ * @param {any} schema - input parameter.
+ * @param {any} key - input parameter.
+ * @param {any} value - input parameter.
+ * @param {any} exceptIndex - input parameter.
+ * @returns {any} Result.
+ */
     const _isDuplicate = (schema, key, value, exceptIndex) => {
         if (!value) return false;
         const v = String(value).toLowerCase();
@@ -1242,6 +1388,12 @@ async function tableEditor(rl, cfg, entityKey) {
         }
         return false;
     };
+    /**
+ * _regexExamplesForType — utility helper; see implementation for details.
+ *
+ * @param {any} type - input parameter.
+ * @returns {any} Result.
+ */
     function _regexExamplesForType(type) {
         switch (type) {
             case 'email': return [
@@ -1265,6 +1417,12 @@ async function tableEditor(rl, cfg, entityKey) {
             default: return [];
         }
     }
+    /**
+ * _inferTypeByName — utility helper; see implementation for details.
+ *
+ * @param {any} name - input parameter.
+ * @returns {any} Result.
+ */
     function _inferTypeByName(name) {
         const t = _nameLooks(name);
         if (t.email) return 'email';
@@ -1273,6 +1431,16 @@ async function tableEditor(rl, cfg, entityKey) {
         if (t.state) return 'state';
         return null;
     }
+    /**
+ * _pickRegexPattern — utility helper; see implementation for details.
+ *
+ * @param {any} rl - input parameter.
+ * @param {any} colName - input parameter.
+ * @param {any} entityKey - input parameter.
+ * @param {any} inferredType - input parameter.
+ * @param {any} currentPattern - input parameter.
+ * @returns {any} Result.
+ */
     async function _pickRegexPattern(rl, colName, entityKey, inferredType, currentPattern) {
         const items = _regexExamplesForType(inferredType || '');
         if (!items.length) {
@@ -1326,6 +1494,13 @@ Regex help examples:
         return currentPattern || '';
     }
 
+    /**
+ * runCreateRegexAssist — utility helper; see implementation for details.
+ *
+ * @param {any} rl - input parameter.
+ * @param {any} entity - input parameter.
+ * @returns {any} Result.
+ */
     async function runCreateRegexAssist(rl, entity) {
         if (!entity || !Array.isArray(entity.schema)) return;
         for (const col of entity.schema) {
@@ -1338,7 +1513,6 @@ Regex help examples:
         }
         console.log('CREATEREGEX pass complete.');
     }
-
 
     while (true) {
         printPreviewTable(cfg, entityKey);
@@ -1420,7 +1594,14 @@ Regex help examples:
         console.log('Unknown input. Type a row number, a column name, A, D <#|name>, B, R, Q, ADD, DEL <#|name>, BACKFILL, CREATEREGEX, or Q.');
     }
 
-
+    /**
+ * editRowInteractive — utility helper; see implementation for details.
+ *
+ * @param {any} rl - input parameter.
+ * @param {any} col - input parameter.
+ * @param {any} entityKey - input parameter.
+ * @returns {any} Result.
+ */
     async function editRowInteractive(rl, col, entityKey) {
         const idxSelf = entity.schema.indexOf(col);
 
@@ -1499,9 +1680,14 @@ Regex help examples:
     }
 }
 
-
 /*
 Backfills updateAPI column from CreateAPI column or vice-versa, based upon the most populated column.
+ */
+/**
+ * runBackfill — utility helper; see implementation for details.
+ *
+ * @param {any} entity - input parameter.
+ * @returns {any} Result.
  */
 async function runBackfill(entity) {
     const cols = entity.schema || [];
@@ -1521,6 +1707,13 @@ async function runBackfill(entity) {
     return { filledCreate, filledUpdate };
 }
 
+/**
+ * printPreviewTable — utility helper; see implementation for details.
+ *
+ * @param {any} cfg - input parameter.
+ * @param {any} entityKey - input parameter.
+ * @returns {any} Result.
+ */
 function printPreviewTable(cfg, entityKey) {
     const e = cfg.entities[entityKey];
     const headers = ['#','Column','Type','Len','PK','createApiField','updateApiField','Req','Immutable','SrvGenOnCreate','Static','GenRegex'];
@@ -1545,7 +1738,14 @@ function printPreviewTable(cfg, entityKey) {
     printTable(headers, rows);
 }
 
-
+/**
+ * applyAnalysis — utility helper; see implementation for details.
+ *
+ * @param {any} entity - input parameter.
+ * @param {any} analysis - input parameter.
+ * @param {any} side - input parameter.
+ * @returns {any} Result.
+ */
 function applyAnalysis(entity, analysis, side ) {
     entity.payload = entity.payload || {};
     entity.payload[side] = entity.payload[side] || { jsonPayloadWrapper: null, requiredKeys: [] };
@@ -1559,6 +1759,3 @@ function applyAnalysis(entity, analysis, side ) {
 
     inferServerGeneratedFields(entity, analysis);
 }
-
-
-

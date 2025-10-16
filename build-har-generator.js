@@ -8,7 +8,7 @@
 "use strict";
 
 const fs = require("fs");
-const { joinUrl, shuffleInPlace, chooseByPercent, _sqlIntCapForType, clampIntForSqlType, coerceAndNormalizeForChangelog, sqlLiteral, simpleEntityName} = require('./build-har-common');
+const { joinUrl, shuffleInPlace, chooseByPercent, _sqlIntCapForType, clampIntForSqlType, coerceAndNormalizeForChangelog, sqlLiteral, simpleEntityName, clampDecimal19_6} = require('./build-har-common');
 const path = require("path");
 
 const {
@@ -119,9 +119,34 @@ function shapePayload({ side, entity, body }) {
     return body;
 }
 
+/**
+ * _randInt — utility helper; see implementation for details.
+ *
+ * @param {any} min - input parameter.
+ * @param {any} max - input parameter.
+ * @returns {any} Result.
+ */
 function _randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+/**
+ * _pick — utility helper; see implementation for details.
+ *
+ * @param {any} arr - input parameter.
+ * @returns {any} Result.
+ */
 function _pick(arr) { return arr[_randInt(0, arr.length - 1)]; }
+/**
+ * _randLetters — utility helper; see implementation for details.
+ *
+ * @param {any} n - input parameter.
+ * @returns {any} Result.
+ */
 function _randLetters(n) { const A = 'abcdefghijklmnopqrstuvwxyz'; let s=''; for (let i=0;i<n;i++) s += A[_randInt(0,25)]; return s; }
+/**
+ * _cap — utility helper; see implementation for details.
+ *
+ * @param {any} s - input parameter.
+ * @returns {any} Result.
+ */
 function _cap(s) { s = String(s||''); return s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s; }
 
 /** Determine maximum content length from column metadata. */
@@ -133,31 +158,33 @@ function _maxLenFromCol(col, fallback=256) {
 
 /** --- HARD CAPS for the changelog table --- */
 const MAX_DEC19_6_INT_DIGITS = 13; // 19 - 6
-const MAX_DEC19_6_ABS = 9999999999999.999999; // 13 nines + . + 6 nines
-function clampDecimal19_6(n) {
-    if (n == null || n === "") return n;
-    let x = Number(n);
-    if (!Number.isFinite(x)) return 0;
-    // round to 6 fractional digits
-    x = Math.round(x * 1e6) / 1e6;
-    if (x >  MAX_DEC19_6_ABS) return MAX_DEC19_6_ABS;
-    if (x < -MAX_DEC19_6_ABS) return -MAX_DEC19_6_ABS;
-    // also ensure integer digits <= 13 (covers 10^13 - 1)
-    const abs = Math.abs(x);
-    if (abs >= 1e13) {
-        const sign = x < 0 ? -1 : 1;
-        return sign * (1e13 - 1e-6); // 9999999999999.999999
-    }
-    return x;
-}
+// const MAX_DEC19_6_ABS = 9999999999999.999999; // 13 nines + . + 6 nines
+// /**
+//  * clampDecimal19_6 — helper for generating representative values that respect SQL types/lengths and DECIMAL(19,6) caps.
+//  *
+//  * @param {any} n - input parameter.
+//  * @returns {any} Result.
+//  */
+// function clampDecimal19_6(n) {
+//     if (n == null || n === "") return n;
+//     let x = Number(n);
+//     if (!Number.isFinite(x)) return 0;
+//     // round to 6 fractional digits
+//     x = Math.round(x * 1e6) / 1e6;
+//     if (x >  MAX_DEC19_6_ABS) return MAX_DEC19_6_ABS;
+//     if (x < -MAX_DEC19_6_ABS) return -MAX_DEC19_6_ABS;
+//     // also ensure integer digits <= 13 (covers 10^13 - 1)
+//     const abs = Math.abs(x);
+//     if (abs >= 1e13) {
+//         const sign = x < 0 ? -1 : 1;
+//         return sign * (1e13 - 1e-6); // 9999999999999.999999
+//     }
+//     return x;
+// }
 
 /** SQL integer caps to avoid overflow in generated values. */
 
-
-
-
 /** Try to coerce and normalize any incoming value for the changelog sinks. */
-
 
 /** Name-based heuristics for common fields (email, phone, city, etc.). */
 function _fallbackByName(col, maxLen) {
@@ -286,9 +313,7 @@ function _fallbackByType(col, maxLen) {
     return _cap(_randLetters(_randLenPercentOfMax(maxLen, 0.2, 25)));
 }
 
-
 /** Convert keys to a display label. */
-
 
 /** Combine name/type heuristics, clipped to column length. */
 function genFallbackForColumn(col) {
@@ -303,7 +328,6 @@ function genFallbackForColumn(col) {
 
 /** NEW: choose a random subset by percentage (rounded) */
 
-
 /**
  * Build request body for create/update honoring CSV overrides, static values, and regex generation,
  * then apply fill% selection over the "change pool".
@@ -313,7 +337,7 @@ function genFallbackForColumn(col) {
  * - UPDATE: immutable are never in the pool (unless they have staticValue, which is included earlier); required are eligible for the pool.
  * - We never send blanks; we omit non-selected fields on UPDATE.
  */
-function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent, entity }) {
+function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent}) {
     const body = {};
     const pool = [];
 
@@ -331,8 +355,7 @@ function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent, 
         if (side === "update" && csvRow && csvHeadersLower && csvHeadersLower.includes(String(field).toLowerCase())) {
             // try to coerce/normalize when numeric column
             const raw = csvRow[field];
-            const normalized = coerceAndNormalizeForChangelog(col, raw);
-            body[field] = normalized;
+            body[field] = coerceAndNormalizeForChangelog(col, raw);
             continue;
         }
 
@@ -381,7 +404,14 @@ function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent, 
     return body;
 }
 
-
+/**
+ * buildHarEntry — utility helper; see implementation for details.
+ *
+ * @param {any} { method - input parameter.
+ * @param {any} url - input parameter.
+ * @param {any} body } - input parameter.
+ * @returns {any} Result.
+ */
 function buildHarEntry({ method, url, body }) {
     return {
         startedDateTime: new Date().toISOString(),
@@ -403,9 +433,14 @@ function buildHarEntry({ method, url, body }) {
     };
 }
 
-
-
-
+/**
+ * buildTopIdsSql — utility helper; see implementation for details.
+ *
+ * @param {any} entityKey - input parameter.
+ * @param {any} entity - input parameter.
+ * @param {any} numRows - input parameter.
+ * @returns {any} Result.
+ */
 function buildTopIdsSql(entityKey, entity, numRows) {
     const idParam0 = entity?.routes?.update?.params?.[0];
     if (!idParam0 || !idParam0.column) die(`Entity "${entityKey}" missing routes.update.params[0].column.`);
@@ -430,6 +465,12 @@ function buildTopIdsSql(entityKey, entity, numRows) {
 }
 
 /* ----------------------- Update-source & key selection ----------------------- */
+/**
+ * createExistingKeyPicker — utility helper; see implementation for details.
+ *
+ * @param {any} updateSource - input parameter.
+ * @returns {any} Result.
+ */
 function createExistingKeyPicker(updateSource) {
     if (!updateSource || !updateSource.csvPath || !Array.isArray(updateSource.fields) || !updateSource.fields.length) {
         throw new Error('Invalid updateSource: expected { csvPath, fields[], reusePolicy }');
@@ -484,8 +525,22 @@ function createExistingKeyPicker(updateSource) {
     };
 }
 
+/**
+ * applyRouteParam — utility helper; see implementation for details.
+ *
+ * @param {any} updatePath - input parameter.
+ * @param {any} idCol - input parameter.
+ * @param {any} idVal - input parameter.
+ * @returns {any} Result.
+ */
 function applyRouteParam(updatePath, idCol, idVal) {
     let out = String(updatePath || "");
+    /**
+ * tryReplace — utility helper; see implementation for details.
+ *
+ * @param {any} pat - input parameter.
+ * @returns {any} Result.
+ */
     const tryReplace = (pat) => {
         const before = out;
         out = out.replace(pat, String(idVal));
@@ -502,6 +557,15 @@ function applyRouteParam(updatePath, idCol, idVal) {
 }
 
 /* --------------------------- UX helpers for UPDATE --------------------------- */
+/**
+ * configureUpdateSourceUX — utility helper; see implementation for details.
+ *
+ * @param {any} entityKey - input parameter.
+ * @param {any} entity - input parameter.
+ * @param {any} bits - input parameter.
+ * @param {any} nUpdate - input parameter.
+ * @returns {any} Result.
+ */
 async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
     while (true) {
         const v = (await askInlinePrefilled(
@@ -669,7 +733,7 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
 
         // CREATE
         for (let i = 0; i < nCreate; i++) {
-            const body = buildBodyForSide({ side: "create", schema, csvRow: null, csvHeadersLower: null, fillPercent: createPercent, entity });
+            const body = buildBodyForSide({ side: "create", schema, csvRow: null, csvHeadersLower: null, fillPercent: createPercent });
             const shaped = shapePayload({ side: "create", entity, body });
             const url = joinUrl(bits.host, bits.createPath);
             allEntries.push(buildHarEntry({ method: bits.createMethod, url, body: shaped }));
@@ -682,7 +746,7 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
             if (!idVal) die(`No "${bits.idCol}" value present in selected key row.`);
 
             const csvHeadersLower = Object.keys(keyObj).map(k => k.toLowerCase());
-            const body = buildBodyForSide({ side: "update", schema, csvRow: keyObj, csvHeadersLower, fillPercent: updatePercent, entity });
+            const body = buildBodyForSide({ side: "update", schema, csvRow: keyObj, csvHeadersLower, fillPercent: updatePercent });
             const shaped = shapePayload({ side: "update", entity, body });
 
             const updatePathApplied = applyRouteParam(bits.updatePath, bits.idCol, idVal);

@@ -6,7 +6,6 @@
  * emits per-file and global summaries, and records thrown fetch exceptions with context.
  */
 
-
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -40,11 +39,9 @@ function saveConfig(fp, cfgObj) {
     console.log(`[ok] Saved defaults to ${fp}`);
 }
 
-
 /** Prompt with visible default and inline prefilled value pulled from config. */
 /** Current timestamp as ISO UTC string. */
 /** Compact timestamp for filenames (no colons, timezone Z). */
-
 
 /** Empirical percentile selection without interpolation. */
 
@@ -53,12 +50,7 @@ function saveConfig(fp, cfgObj) {
 // ---------- base64url / JWT helpers ----------
 /** Base64url encode a UTF‑8 string using URL-safe alphabet and no padding. */
 
-
-
-
-
 /** Refresh an HS256 JWT (update exp and re-sign); pass-through for non-HS256 tokens. */
-
 
 // ---------- HAR parsing & heuristics ----------
 /** Extract HAR entries from log.entries or top-level entries array. */
@@ -100,9 +92,7 @@ function prepareQueue(entries) {
     return out;
 }
 
-
 /** === Global Stats CSV (header-or-append) === */
-
 
 const GLOBAL_CSV_COLUMNS = [
     'timestamp','run_title','avg_ms','min_ms','max_ms','p50_ms','p90_ms','p99_ms',
@@ -110,6 +100,14 @@ const GLOBAL_CSV_COLUMNS = [
     'total_threads_spawned','executed_requests',
     'exceptions_total','c2xx','c3xx','c4xx','c5xx','error_status'
 ];
+/**
+ * appendGlobalStatsCsvRow — HAR execution/metrics helper; refer to the name for the specific role.
+ *
+ * @param {any} csvPath - input parameter.
+ * @param {any} columns - input parameter.
+ * @param {any} values - input parameter.
+ * @returns {any} Result.
+ */
 function appendGlobalStatsCsvRow(csvPath, columns, values) {
     try {
         ensureDirForFile(csvPath);
@@ -136,6 +134,13 @@ function buildGlobalCsvRow(opts) {
     ];
 }
 
+/**
+ * resolveCsvPath — HAR execution/metrics helper; refer to the name for the specific role.
+ *
+ * @param {any} initialPath - input parameter.
+ * @param {any} cfgPrefill - input parameter.
+ * @returns {any} Result.
+ */
 async function resolveCsvPath(initialPath, cfgPrefill) {
     let p = initialPath;
 
@@ -197,7 +202,6 @@ function openExceptionWriterFor(harPath) {
         }
     };
 }
-
 
 // ---------- metrics aggregation (with HTTP method tallies) ----------
 /** Initialize accumulators for timing, status/method counts, and per-URL aggregates. */
@@ -287,6 +291,13 @@ function printSummaryBlock(title, s, extraLines = [], excPathMaybe) {
     if (excPathMaybe) console.log(`Exceptions file  : ${excPathMaybe}`);
     console.log('');
 }
+/**
+ * printTopTables — HAR execution/metrics helper; refer to the name for the specific role.
+ *
+ * @param {any} title - input parameter.
+ * @param {any} m - input parameter.
+ * @returns {any} Result.
+ */
 function printTopTables(title, m) {
     console.log(title);
     const vals = Array.from(m.perUrlAgg.values());
@@ -343,8 +354,20 @@ function makeProgressRenderer(harStates, showPerThreadProgress) {
         console.log('');
     }
 
+    /**
+ * renderLine — utility helper; see implementation for details.
+ *
+ * @param {any} str - input parameter.
+ * @returns {any} Result.
+ */
     function renderLine(str) { process.stdout.write(str + '\n'); }
 
+    /**
+ * percentForHar — utility helper; see implementation for details.
+ *
+ * @param {any} hs - input parameter.
+ * @returns {any} Result.
+ */
     function percentForHar(hs) {
         if (hs.limiter === 'time') {
             const elapsed = Date.now() - hs.startTime;
@@ -355,18 +378,35 @@ function makeProgressRenderer(harStates, showPerThreadProgress) {
             return Math.floor(Math.min(1, hs.done / denom) * 100);
         }
     }
+    /**
+ * percentForThread — utility helper; see implementation for details.
+ *
+ * @param {any} hs - input parameter.
+ * @param {any} i - input parameter.
+ * @returns {any} Result.
+ */
     function percentForThread(hs, i) {
         const denom = Math.max(1, hs.perThreadTargetCalls[i] || 0);
         const val = Math.min(1, (hs.perThread[i] || 0) / denom);
         return Math.floor(val * 100);
     }
 
+    /**
+ * barFor — utility helper; see implementation for details.
+ *
+ * @param {any} pct - input parameter.
+ * @returns {any} Result.
+ */
     function barFor(pct) {
         const len = 20;
         const filled = Math.max(0, Math.min(len, Math.floor((pct / 100) * len)));
         return '█'.repeat(filled) + ' '.repeat(len - filled);
     }
 
+    /**
+ * draw — utility helper; see implementation for details.
+ * @returns {any} Result.
+ */
     function draw() {
         readline.moveCursor(process.stdout, 0, -totalLines);
         readline.clearScreenDown(process.stdout);
@@ -409,6 +449,12 @@ function makeProgressRenderer(harStates, showPerThreadProgress) {
     };
 }
 
+/**
+ * selectHarFilesFromCwd — utility helper; see implementation for details.
+ *
+ * @param {any} maxSelect - input parameter.
+ * @returns {any} Result.
+ */
 async function selectHarFilesFromCwd(maxSelect = 4) {
     const all = fs.readdirSync(process.cwd())
         .filter(f => f.toLowerCase().endsWith('.har'))
@@ -461,6 +507,19 @@ async function selectHarFilesFromCwd(maxSelect = 4) {
 }
 
 // ---------- run one HAR with N threads ----------
+/**
+ * runOneHar — utility helper; see implementation for details.
+ *
+ * @param {any} harInfo - input parameter.
+ * @param {any} threadsPerFile - input parameter.
+ * @param {any} maxMinutes - input parameter.
+ * @param {any} maxCallsPerThread - input parameter.
+ * @param {any} useExternalTokens - input parameter.
+ * @param {any} tokenLines - input parameter.
+ * @param {any} jwtSecretOrNull - input parameter.
+ * @param {any} progressStateRef - input parameter.
+ * @returns {any} Result.
+ */
 async function runOneHar(harInfo, threadsPerFile, maxMinutes, maxCallsPerThread, useExternalTokens, tokenLines, jwtSecretOrNull, progressStateRef) {
     // Prepare entries (shuffled in chunks)
     const entriesPrepared = prepareQueue(harInfo.entries);
@@ -514,6 +573,10 @@ async function runOneHar(harInfo, threadsPerFile, maxMinutes, maxCallsPerThread,
     };
     if (progressStateRef) Object.assign(progressStateRef, prog);
 
+    /**
+ * syncProgressOut — utility helper; see implementation for details.
+ * @returns {any} Result.
+ */
     function syncProgressOut() {
         if (!progressStateRef) return;
         progressStateRef.done = prog.done;
@@ -526,6 +589,12 @@ async function runOneHar(harInfo, threadsPerFile, maxMinutes, maxCallsPerThread,
         progressStateRef.callsInFile = prog.callsInFile;
     }
 
+    /**
+ * chooseAuthToken — utility helper; see implementation for details.
+ *
+ * @param {any} originalHeaders - input parameter.
+ * @returns {any} Result.
+ */
     function chooseAuthToken(originalHeaders) {
         let token = null;
         if (useExternalTokens && tokenLines.length) {
@@ -541,6 +610,13 @@ async function runOneHar(harInfo, threadsPerFile, maxMinutes, maxCallsPerThread,
         return token;
     }
 
+    /**
+ * bumpClassTotals — utility helper; see implementation for details.
+ *
+ * @param {any} ct - input parameter.
+ * @param {any} statusOrErr - input parameter.
+ * @returns {any} Result.
+ */
     function bumpClassTotals(ct, statusOrErr) {
         if (statusOrErr === 'ERROR') { ct.err += 1; return; }
         const s = Number(statusOrErr);
@@ -554,6 +630,14 @@ async function runOneHar(harInfo, threadsPerFile, maxMinutes, maxCallsPerThread,
     const perThreadSummaries = [];
     const startAll = Date.now();
 
+    /**
+ * doOneCall — utility helper; see implementation for details.
+ *
+ * @param {any} entry - input parameter.
+ * @param {any} m - input parameter.
+ * @param {any} tid - input parameter.
+ * @returns {any} Result.
+ */
     async function doOneCall(entry, m, tid) {
         const req = entry.request || {};
         const url = req.url;
@@ -583,7 +667,6 @@ async function runOneHar(harInfo, threadsPerFile, maxMinutes, maxCallsPerThread,
                 excWriter.writeRow(method, url, txt || '', body || '', JSON.stringify(outHeaders));
             }
 
-
             recordTiming(m, url, method, res.status, dt);
             bumpClassTotals(prog.classTotals, res.status);
             bumpClassTotals(prog.perThreadClassTotals[tid], res.status);
@@ -593,7 +676,6 @@ async function runOneHar(harInfo, threadsPerFile, maxMinutes, maxCallsPerThread,
 
             // Network/Thrown error
             excWriter.writeRow(method, url, String((err && err.message) || 'FETCH_ERROR'), body || '', JSON.stringify(outHeaders));
-
 
             totals.exceptions += 1;
             m.exceptions += 1;
@@ -664,7 +746,22 @@ async function runOneHar(harInfo, threadsPerFile, maxMinutes, maxCallsPerThread,
     };
 }
 
+/**
+ * printIntro — utility helper; see implementation for details.
+ *
+ * @param {any} detected - input parameter.
+ * @returns {any} Result.
+ */
 function printIntro(detected) {
+    /**
+ * line — utility helper; see implementation for details.
+ *
+ * @param {any} name - input parameter.
+ * @param {any} required - input parameter.
+ * @param {any} present - input parameter.
+ * @param {any} note - input parameter.
+ * @returns {any} Result.
+ */
     const line = (name, required, present, note = '') => {
         const symbol = present ? '✓' : (required ? '✗' : '•');
         const req = required ? 'required' : 'optional';
@@ -682,7 +779,6 @@ function printIntro(detected) {
         '— HS256 secret used to auto refresh JWT expirations (optional).'));
     console.log('────────────────────────────────────────────────────────────────────────\n');
 }
-
 
 // ---------- main ----------
 (async function main() {
@@ -714,10 +810,9 @@ function printIntro(detected) {
     const showPerThreadProgress = await askYesNoPrefill('Show per-thread live progress?', false, cfg.show_per_thread_progress);
 
     let outputCsv = await askPrefill('Run metrics CSV filename', 'run-har-stats.csv', cfg.output_csv || 'run-har-stats.csv');
-    const { path: resolvedCsv /*, mode*/ } = await resolveCsvPath(outputCsv, cfg.output_csv || outputCsv);
+    const { path: resolvedCsv /*, mode*/
+ } = await resolveCsvPath(outputCsv, cfg.output_csv || outputCsv);
     outputCsv = resolvedCsv;
-
-
 
     const newCfg = {
         run_title: runTitle,
@@ -775,7 +870,8 @@ function printIntro(detected) {
             console.log(`[warn] ${info.path} contains populated Authorization headers (sensitive).`);
             let ans = (await ask('Use tokens from HAR (unsafe) or override with authTokens.txt? (har/auth) [default: auth]: ') || 'auth').toLowerCase();
             if (ans === 'auth') useExternalTokens = true;
-            else if (ans === 'har') { /* keep embedded tokens for that HAR */ }
+            else if (ans === 'har') { /* keep embedded tokens for that HAR */
+ }
             else useExternalTokens = true;
         }
     }

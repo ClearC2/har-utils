@@ -817,8 +817,8 @@ async function harFlow(rl, cfg, entityKey) {
     const entries = harvestEntries(har);
     const summary = harSummary(entries);
     const hostChoice = await pickHostRequireChoice(rl, summary.hosts, entityKey);
-    const createChoice = await pickRouteRequireChoice(rl, summary.routesByMethodPath['POST'] || [], `CREATE (POST) — ${entityKey}`);
-    const updateChoice = await pickRouteRequireChoice(rl, summary.routesByMethodPath['POST'] || [], `UPDATE (POST) — ${entityKey}`);
+    const createChoice = await pickRouteRequireChoice(rl, summary.routesByMethodPath['POST'] || [], `the CREATE API call example from the example har for ${entityKey}`);
+    const updateChoice = await pickRouteRequireChoice(rl, summary.routesByMethodPath['POST'] || [], `the UPDATE API call example from the example har for ${entityKey}`);
 
     ent.routes = ent.routes || {host: null, create: {}, update: {}};
     ent.routes.host = hostChoice;
@@ -907,9 +907,9 @@ function harSummary(entries) {
             hosts.add(`${u.protocol}//${u.host}`);
         } catch {
         }
-        const key = e.method;
+        const key = e.method.toUpperCase();
         const arr = routesByMethodPath[key] || (routesByMethodPath[key] = []);
-        if (!arr.some(r => r.path === e.path)) arr.push({path: e.path});
+        if (!arr.some(r => r.path === e.path)) arr.push({ method: e.method, path: e.path });
     }
     return {hosts: Array.from(hosts), routesByMethodPath};
 }
@@ -947,8 +947,12 @@ async function pickHostRequireChoice(rl, hosts, entityKey) {
 async function pickRouteRequireChoice(rl, routes, label) {
     if (!routes.length) throw new Error(`No ${label} routes found.`);
     if (routes.length === 1) return routes[0];
-    console.log(`\n${label} routes:`);
-    routes.forEach((r, i) => console.log(`  ${String(i + 1).padStart(2, ' ')}. ${r.path}`));
+    console.log(`\nFound routes:\n`);
+    routes.forEach((r, i) => {
+        const m = r.method || "—";
+        console.log(`  ${String(i + 1).padStart(2, ' ')}. [${m}] ${r.path}`);
+    });
+    console.log("");
     const idx = parseInt(await askWithDefault(rl, `Pick ${label} route #`, '1'), 10) - 1;
     if (idx < 0 || idx >= routes.length) return routes[0];
     return routes[idx];
@@ -1021,14 +1025,16 @@ function analyzeSingleEntry(entry, entity, side) {
 
 
     const wrapperPath = findWrapper(reqJson, {returnPath: true});
+
     const unwrappedReq = wrapperPath ? unwrapByPath(reqJson, wrapperPath) : reqJson;
-    const unwrappedRes = wrapperPath ? unwrapByPath(reqJson, wrapperPath) : resJson;
+    const unwrappedRes = wrapperPath ? unwrapByPath(resJson, wrapperPath) : resJson;
 
     const reqLeafs = new Set(collectKeysDeep(unwrappedReq || {}));
     const resLeafs = new Set(collectKeysDeep(unwrappedRes || {}));
     const leafs = (obj) => collectKeysDeep(obj || {});
     const reqDeep = new Set(leafs(unwrappedReq));
     const resDeep = new Set(leafs(unwrappedRes));
+    const headersSan = sanitizeHeaders(entry?.req?.headers);
 
     return {
         side,
@@ -1038,7 +1044,8 @@ function analyzeSingleEntry(entry, entity, side) {
         reqDeepKeys: Array.from(reqDeep),
         resDeepKeys: Array.from(resDeep),
         exampleReq: unwrappedReq || {},
-        exampleRes: resJson || {}
+        exampleRes: resJson || {},
+        headers: headersSan
     };
 
     /**
@@ -1933,6 +1940,13 @@ function applyAnalysis(entity, analysis, side) {
     if (analysis.wrapper) entity.payload[side].jsonPayloadWrapper = analysis.wrapper;
 
     entity.payload[side].requiredKeys = [];
+
+    entity.routes = entity.routes || { create: { headers: [] }, update: { headers: [] } };
+    entity.routes[side] = entity.routes[side] || { headers: [] };
+
+    if (analysis.headers && analysis.headers.length) {
+        entity.routes[side].headers = sanitizeHeaders(analysis.headers);
+    }
 
     const schema = entity.schema || [];
     fillMappingsFromKeysDeep(schema, analysis, side);

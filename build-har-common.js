@@ -1,7 +1,7 @@
 /**
  * @file build-har-common.js
- * @summary Shared utility library for CLI prompts, JSONC I/O, entity helpers, and small generators.
- * @description Used by the config wizard, HAR generator, and HAR runner to keep UX and parsing consistent.
+ * @summary Shared utilities for prompts, JSONC I/O, JWT/base64 helpers, URL/text formatting, and small generators.
+ * @description Used by the config wizard, HAR generator, and HAR runner to keep UX, parsing, and I/O behavior consistent across tools.
  */
 "use strict";
 

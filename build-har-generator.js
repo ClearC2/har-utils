@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 /**
  * @file build-har-generator.js
- * @summary HAR generator (G mode) with per-entity create/update controls.
- * @description Interactively chooses counts, optional CSV for updates, builds payloads from schema/static/regex,
- * validates required keys, and writes a single HAR after confirmation.
+ * @summary HAR generator with per‑entity create/update controls (G mode).
+ * @description Collects counts, optional CSV for updates, builds bodies from schema/statics/regex, validates required keys, and writes a single HAR.
  */
 "use strict";
 
@@ -158,33 +157,6 @@ function _maxLenFromCol(col, fallback=256) {
 
 /** --- HARD CAPS for the changelog table --- */
 const MAX_DEC19_6_INT_DIGITS = 13; // 19 - 6
-// const MAX_DEC19_6_ABS = 9999999999999.999999; // 13 nines + . + 6 nines
-// /**
-//  * clampDecimal19_6 — helper for generating representative values that respect SQL types/lengths and DECIMAL(19,6) caps.
-//  *
-//  * @param {any} n - input parameter.
-//  * @returns {any} Result.
-//  */
-// function clampDecimal19_6(n) {
-//     if (n == null || n === "") return n;
-//     let x = Number(n);
-//     if (!Number.isFinite(x)) return 0;
-//     // round to 6 fractional digits
-//     x = Math.round(x * 1e6) / 1e6;
-//     if (x >  MAX_DEC19_6_ABS) return MAX_DEC19_6_ABS;
-//     if (x < -MAX_DEC19_6_ABS) return -MAX_DEC19_6_ABS;
-//     // also ensure integer digits <= 13 (covers 10^13 - 1)
-//     const abs = Math.abs(x);
-//     if (abs >= 1e13) {
-//         const sign = x < 0 ? -1 : 1;
-//         return sign * (1e13 - 1e-6); // 9999999999999.999999
-//     }
-//     return x;
-// }
-
-/** SQL integer caps to avoid overflow in generated values. */
-
-/** Try to coerce and normalize any incoming value for the changelog sinks. */
 
 /** Name-based heuristics for common fields (email, phone, city, etc.). */
 function _fallbackByName(col, maxLen) {
@@ -313,8 +285,6 @@ function _fallbackByType(col, maxLen) {
     return _cap(_randLetters(_randLenPercentOfMax(maxLen, 0.2, 25)));
 }
 
-/** Convert keys to a display label. */
-
 /** Combine name/type heuristics, clipped to column length. */
 function genFallbackForColumn(col) {
     const maxLen = _maxLenFromCol(col, 256);
@@ -325,8 +295,6 @@ function genFallbackForColumn(col) {
     const byType = _fallbackByType(col, maxLen);
     return (typeof byType === 'string') ? byType.slice(0, maxLen) : byType;
 }
-
-/** NEW: choose a random subset by percentage (rounded) */
 
 /**
  * Build request body for create/update honoring CSV overrides, static values, and regex generation,
@@ -464,12 +432,13 @@ function buildTopIdsSql(entityKey, entity, numRows) {
     ].join("\n");
 }
 
-/* ----------------------- Update-source & key selection ----------------------- */
 /**
- * createExistingKeyPicker — utility helper; see implementation for details.
+ * createExistingKeyPicker — build a key-selection helper from a CSV file.
+ * Reads a CSV/TSV of existing records, validates key columns, and prepares a reusable
+ * or randomized iterator (based on reusePolicy) for supplying IDs during update generation.
  *
- * @param {any} updateSource - input parameter.
- * @returns {any} Result.
+ * @param {Object} updateSource - Object with csvPath, fields[], and optional reusePolicy.
+ * @returns {Function} Iterator function that returns key objects per call.
  */
 function createExistingKeyPicker(updateSource) {
     if (!updateSource || !updateSource.csvPath || !Array.isArray(updateSource.fields) || !updateSource.fields.length) {
@@ -526,21 +495,16 @@ function createExistingKeyPicker(updateSource) {
 }
 
 /**
- * applyRouteParam — utility helper; see implementation for details.
+ * applyRouteParam — substitute a dynamic route placeholder with an actual value.
+ * Replaces tokens like ":id" or "{id}" in a route string using the provided key/value pair,
+ * ensuring a valid final URL path for HAR request generation.
  *
- * @param {any} updatePath - input parameter.
- * @param {any} idCol - input parameter.
- * @param {any} idVal - input parameter.
- * @returns {any} Result.
+ * @param {string} route - The API route template containing placeholder tokens.
+ * @param {Object} keyObj - Object containing key names and their replacement values.
+ * @returns {string} Route string with parameters replaced.
  */
 function applyRouteParam(updatePath, idCol, idVal) {
     let out = String(updatePath || "");
-    /**
- * tryReplace — utility helper; see implementation for details.
- *
- * @param {any} pat - input parameter.
- * @returns {any} Result.
- */
     const tryReplace = (pat) => {
         const before = out;
         out = out.replace(pat, String(idVal));
@@ -556,15 +520,14 @@ function applyRouteParam(updatePath, idCol, idVal) {
     return out.replace(/\/+$/, "") + "/" + encodeURIComponent(String(idVal));
 }
 
-/* --------------------------- UX helpers for UPDATE --------------------------- */
 /**
- * configureUpdateSourceUX — utility helper; see implementation for details.
+ * configureUpdateSourceUX — guide the user through selecting and configuring an update source.
+ * Prompts for an existing CSV file or new path, detects delimiters, loads headers,
+ * and builds a reusable updateSource object containing fields, csvPath, and reusePolicy
+ * for downstream update or key-generation workflows.
  *
- * @param {any} entityKey - input parameter.
- * @param {any} entity - input parameter.
- * @param {any} bits - input parameter.
- * @param {any} nUpdate - input parameter.
- * @returns {any} Result.
+ * @param {Object} cfg - Current configuration object to populate or modify.
+ * @returns {Promise<Object>} The configured updateSource descriptor.
  */
 async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
     while (true) {

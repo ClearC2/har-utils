@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 /**
  * @file har-runner.js
- * @summary Parallel HAR executor & performance summarizer (R mode).
- * @description Replays XHR-like entries (heuristics + DevTools tags), tracks timing/HTTP stats,
- * emits per-file and global summaries, and records thrown fetch exceptions with context.
+ * @summary Parallel HAR executor and performance summarizer (R mode).
+ * @description Replays XHR‑like entries, measures timing/HTTP stats, prints tables, and logs thrown‑fetch exceptions with context.
  */
 
 const fs = require('fs');

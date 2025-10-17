@@ -174,7 +174,7 @@ function saveConfigClean(cfg) {
                 await harFlow(rl, cfg, entityKey);
             } else {
                 console.log('');
-                const wantHar = await askYesNo(rl, `Supply a sample HAR with API calls that create and update ${entityKey}?`, false);
+                const wantHar = await askYesNo(rl, `Supply a sample HAR with API calls that create/update/get ${entityKey}?`, false);
                 if (wantHar) {
                     await harFlow(rl, cfg, entityKey);
                 } else {
@@ -195,8 +195,7 @@ function saveConfigClean(cfg) {
 
 /**
  * reviewLoop — interactive review flow for one entity.
- * Renders PREVIEW / HEADERS / SUMMARY screens, accepts commands to open editors (T/H),
- * and persists on Quit (Q).
+ * Renders PREVIEW / HEADERS / QUERYSTRINGS / SUMMARY screens, accepts commands to open editors
  *
  * @param {any} rl - Readline interface for user prompts.
  * @param {any} cfg - Mutable configuration object.
@@ -205,39 +204,78 @@ function saveConfigClean(cfg) {
  */
 async function reviewLoop(rl, cfg, entityKey) {
     while (true) {
+        // Preview + detail sections
         printPreviewTable(cfg, entityKey);
         printHeaders(cfg.entities[entityKey], entityKey);
+        printQueryStrings(cfg.entities[entityKey], entityKey);
         printSummary(cfg.entities[entityKey], entityKey);
-        console.log('\nDo you want to edit the TABLE (T), HEADERS (H), SUMMARY (S), or Q to save and exit .');
+
+        // Main menu
+        console.log('\nEdit: TABLE (T), HEADERS (H), SUMMARY (S), QUERYSTRINGS (Q), or e[X]it & save.');
         const cmd = (await askWithDefault(rl, '> ', '')).trim().toUpperCase();
-        if (cmd === 'Q') {
-            saveConfigClean(cfg);
-            console.log('Configuration saved.');
-            rl.close();
-            process.exit(0);
-        } else if (cmd === 'TABLE' || cmd === 'T') {
-            await tableEditor(rl, cfg, entityKey);
-            console.log('');
-        } else if (cmd === 'HEADERS' || cmd === 'HEADER' || cmd === 'H') {
-            await headersEditor(rl, cfg, entityKey);
-            console.log('');
-        } else if (cmd === 'SUMMARY' || cmd === 'S') {
-            await summaryPromptsOnce(rl, cfg.entities[entityKey], entityKey);
-            console.log('');
-        } else {
-            console.log('Unknown command. Type T, H, S, or Q.');
+
+        if (!cmd) {
+            continue;
         }
+
+        // Exit/save (X)
+        if (cmd === 'X' || cmd === 'EXIT' || cmd === 'SAVE' || cmd === 'SAVE&EXIT') {
+            try {
+                saveConfigClean(cfg);
+                console.log('Configuration saved.');
+            } catch (e) {
+                console.log('Save failed:', e?.message || e);
+            }
+            try { rl.close(); } catch {}
+            try { process.exit(0); } catch {}
+            return; // in case process.exit is blocked
+        }
+
+        // Table editor (T)
+        if (cmd === 'T' || cmd === 'TABLE') {
+            try { await tableEditor(rl, cfg, entityKey); }
+            catch (e) { console.log('TABLE editor error:', e?.message || e); }
+            console.log('');
+            continue;
+        }
+
+        // Headers editor (H)
+        if (cmd === 'H' || cmd === 'HEADER' || cmd === 'HEADERS') {
+            try { await headersEditor(rl, cfg, entityKey); }
+            catch (e) { console.log('HEADERS editor error:', e?.message || e); }
+            console.log('');
+            continue;
+        }
+
+        // Summary editor (S)
+        if (cmd === 'S' || cmd === 'SUMMARY') {
+            try { await summaryPromptsOnce(rl, cfg.entities[entityKey], entityKey); }
+            catch (e) { console.log('SUMMARY editor error:', e?.message || e); }
+            console.log('');
+            continue;
+        }
+
+        // NEW: QueryStrings editor (Q)
+        if (cmd === 'Q' || cmd === 'QUERY' || cmd === 'QUERYSTRINGS') {
+            try { await queryStringEditor(rl, cfg, entityKey); }
+            catch (e) { console.log('QUERYSTRINGS editor error:', e?.message || e); }
+            console.log('');
+            continue;
+        }
+
+        console.log('Unknown command. Type T, H, S, Q, or X.');
     }
 }
+
 
 
 /**
  * upsertEntity — ensure an entity exists and is normalized.
  * Creates or updates routes, payload wrapper sections, and schema arrays; migrates legacy fields
- * and guarantees headers arrays exist for both create/update sides.
+ * and guarantees headers arrays exist for get/create/update sides.
  *
  * @param {any} cfg - Configuration object to mutate.
- * @param {string} key - Canonical entity key to create or update.
+ * @param {string} key - Canonical entity key to get, create or update.
  * @returns {any} The updated entity object.
  */
 function upsertEntity(cfg, key) {
@@ -246,16 +284,22 @@ function upsertEntity(cfg, key) {
         cfg.entities[key] = {
             routes: {
                 host: null,
-                create: {path: null, method: null, params: [], headers: []},
-                update: {path: null, method: null, params: [], headers: []}
-            }, payload: {
-                create: {jsonPayloadWrapper: null, requiredKeys: []},
-                update: {jsonPayloadWrapper: null, requiredKeys: []}
-            }, schema: [], sources: {sqlPath: '', harPath: ''}
+                create: { path: null, method: null, params: [], query: [], headers: [] },
+                update: { path: null, method: null, params: [], query: [], headers: [] },
+                get:    { path: null, method: 'GET',  params: [], query: [], headers: [] }
+            },
+            payload: {
+                create: { jsonPayloadWrapper: null, requiredKeys: [] },
+                update: { jsonPayloadWrapper: null, requiredKeys: [] }
+            },
+            schema: [],
+            sources: { sqlPath: '', harPath: '' }
         };
     } else {
+        const e = cfg.entities[key];
 
-        const p = cfg.entities[key].payload || (cfg.entities[key].payload = {});
+        // payload normalize
+        const p = e.payload || (e.payload = {});
         for (const side of ['create', 'update']) {
             const obj = p[side] || (p[side] = {});
             if ('wrapper' in obj && !('jsonPayloadWrapper' in obj)) {
@@ -266,19 +310,21 @@ function upsertEntity(cfg, key) {
             if (!('requiredKeys' in obj)) obj.requiredKeys = [];
         }
 
+        // routes normalize
+        e.routes = e.routes || {};
+        e.routes.create = e.routes.create || { path: null, method: null, params: [], headers: [] };
+        e.routes.update = e.routes.update || { path: null, method: null, params: [], headers: [] };
+        if (!('headers' in e.routes.create)) e.routes.create.headers = [];
+        if (!('headers' in e.routes.update)) e.routes.update.headers = [];
+        if (!('params'  in e.routes.create)) e.routes.create.params  = [];
+        if (!('params'  in e.routes.update)) e.routes.update.params  = [];
+        if (!('query'   in e.routes.create)) e.routes.create.query   = [];
+        if (!('query'   in e.routes.update)) e.routes.update.query   = [];
 
-        cfg.entities[key].routes = cfg.entities[key].routes || {create: {}, update: {}};
-        cfg.entities[key].routes.create = cfg.entities[key].routes.create || {};
-        cfg.entities[key].routes.update = cfg.entities[key].routes.update || {};
-        if (!("headers" in cfg.entities[key].routes.create)) cfg.entities[key].routes.create.headers = [];
-        if (!("headers" in cfg.entities[key].routes.update)) cfg.entities[key].routes.update.headers = [];
-        cfg.entities[key].sources = cfg.entities[key].sources || {sqlPath: '', harPath: ''};
-
-        cfg.entities[key].routes = cfg.entities[key].routes || {create: {}, update: {}};
-        cfg.entities[key].routes.create = cfg.entities[key].routes.create || {};
-        cfg.entities[key].routes.update = cfg.entities[key].routes.update || {};
-        if (!("headers" in cfg.entities[key].routes.create)) cfg.entities[key].routes.create.headers = [];
-        if (!("headers" in cfg.entities[key].routes.update)) cfg.entities[key].routes.update.headers = [];
+        if (!e.routes.get) e.routes.get = { path: null, method: 'GET', params: [], query: [], headers: [] };
+        if (!('headers' in e.routes.get))  e.routes.get.headers = [];
+        if (!('params'  in e.routes.get))  e.routes.get.params  = [];
+        if (!('query'   in e.routes.get))  e.routes.get.query   = [];
     }
     return cfg.entities[key];
 }
@@ -608,37 +654,101 @@ function mergeSchema(cfg, entityKey, parsed, {mode}) {
  * @returns {Promise<void>}
  */
 async function summaryPromptsOnce(rl, e, entityKey) {
-    const routes = e.routes || (e.routes = {host: null, create: {}, update: {}});
-    routes.create = routes.create || {path: null, method: null, params: []};
-    routes.update = routes.update || {path: null, method: null, params: []};
-    e.payload = e.payload || {create: {}, update: {}};
-    e.payload.create = e.payload.create || {jsonPayloadWrapper: null, requiredKeys: []};
-    e.payload.update = e.payload.update || {jsonPayloadWrapper: null, requiredKeys: []};
+    // Ensure structure
+    e.routes = e.routes || { host: null, create: {}, update: {}, get: {} };
+    const routes = e.routes;
+
+    // Make sure shells exist so prompts don’t crash
+    routes.create = routes.create || { path: null, method: null, params: [], query: [], headers: [] };
+    routes.update = routes.update || { path: null, method: null, params: [], query: [], headers: [] };
+    routes.get    = routes.get    || { path: null, method: null, params: [], query: [], headers: [] };
+
+    e.payload = e.payload || { create: {}, update: {} };
+    e.payload.create = e.payload.create || { jsonPayloadWrapper: null, requiredKeys: [] };
+    e.payload.update = e.payload.update || { jsonPayloadWrapper: null, requiredKeys: [] };
 
     console.log(`\nPlease edit or confirm for entity ${entityKey}:\n`);
 
-    routes.host = await askInlinePrefilled(rl, `(${entityKey}) Host:`, routes.host || (e.routes.host || ''));
+    // Host (free-form; Enter keeps current)
+    routes.host = await askInlinePrefilled(rl, `(${entityKey}) Host:`, routes.host || '');
 
-    routes.create.method = (await askInlinePrefilled(rl, `(${entityKey}) CREATE method:`, (routes.create.method || 'POST').toUpperCase())).toUpperCase();
-    routes.create.path = await askInlinePrefilled(rl, `(${entityKey}) CREATE path:`, routes.create.path || '/api/<entity>');
-
-    routes.update.method = (await askInlinePrefilled(rl, `(${entityKey}) UPDATE method:`, (routes.update.method || 'POST').toUpperCase())).toUpperCase();
-    routes.update.path = await askInlinePrefilled(rl, `(${entityKey}) UPDATE path:`, routes.update.path || `/api/${entityKey.toLowerCase()}/id/:id`);
-
-
-    const currentIdParam = (routes.update.params && routes.update.params[0]) || {name: 'id', column: ''};
-    let defaultIdColumn = currentIdParam.column || bestPkOrBlank(e);
-    if (!defaultIdColumn) {
-        defaultIdColumn = await promptForPkColumn(rl, e.schema, entityKey);
+    // Helper: verb prompt with constraints, no injected default.
+    async function promptMethod(label, current) {
+        const allowed = ['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'];
+        while (true) {
+            const raw = await askInlinePrefilled(rl, `(${entityKey}) ${label} method:`, (current || ''));
+            const v = String(raw || '').trim();
+            if (v === '') return current || null; // keep as-is (including blank)
+            const up = v.toUpperCase();
+            if (allowed.includes(up)) return up;
+            console.log(`Invalid HTTP verb. Allowed: ${allowed.join(', ')}`);
+        }
     }
-    const idCol = await askInlinePrefilled(rl, `(${entityKey}) UPDATE param "id" column:`, defaultIdColumn || '');
-    routes.update.params = [{name: 'id', column: idCol}];
 
-    const cwrap = await askInlinePrefilled(rl, `(${entityKey}) CREATE JSON payload wrapper (blank = none):`, e.payload.create.jsonPayloadWrapper || '');
-    e.payload.create.jsonPayloadWrapper = cwrap || null;
+    // Helper: prompt path (free-form; Enter keeps current)
+    async function promptPath(label, current) {
+        const raw = await askInlinePrefilled(rl, `(${entityKey}) ${label} path:`, (current || ''));
+        return (raw ?? '');
+    }
 
-    const uwrap = await askInlinePrefilled(rl, `(${entityKey}) UPDATE JSON payload wrapper (blank = none):`, e.payload.update.jsonPayloadWrapper || '');
-    e.payload.update.jsonPayloadWrapper = uwrap || null;
+    // Helper: detect slug names from path (":id", ":fooBar")
+    function extractSlugNames(path) {
+        const m = String(path || '').match(/:([A-Za-z0-9_]+)/g) || [];
+        return m.map(s => s.slice(1));
+    }
+
+    // Helper: walk each slug and prompt for its mapped schema column
+    async function promptSlugMapping(label, path, existingParams) {
+        const names = extractSlugNames(path);
+        if (!names.length) return [];
+
+        const existingMap = new Map((existingParams || []).map(p => [String(p?.name || '').toLowerCase(), p?.column || '']));
+
+        const result = [];
+        for (const n of names) {
+            const cur = existingMap.get(n.toLowerCase()) || '';
+            const picked = await askInlinePrefilled(rl, `(${entityKey}) ${label} slug ":${n}" maps to column:`, cur);
+            result.push({ name: n, column: String(picked || '').trim() });
+        }
+        return result;
+    }
+
+    // ==== CREATE ====
+    routes.create.method = await promptMethod('CREATE', routes.create.method);
+    routes.create.path   = await promptPath('CREATE',  routes.create.path);
+    if (routes.create.path) {
+        routes.create.params = await promptSlugMapping('CREATE', routes.create.path, routes.create.params);
+        const cwrap = await askInlinePrefilled(rl, `(${entityKey}) CREATE JSON payload wrapper (blank = none):`, e.payload.create.jsonPayloadWrapper || '');
+        e.payload.create.jsonPayloadWrapper = cwrap ? cwrap : null;
+    }
+
+    // ==== UPDATE ====
+    routes.update.method = await promptMethod('UPDATE', routes.update.method);
+    routes.update.path   = await promptPath('UPDATE',  routes.update.path);
+    if (routes.update.path) {
+        routes.update.params = await promptSlugMapping('UPDATE', routes.update.path, routes.update.params);
+        const currentPkParam = (routes.update.params && routes.update.params[0]) || {name: 'id', column: ''};
+        let defaultPkColumn = currentPkParam.column || bestPkOrBlank(e);
+        if (!defaultPkColumn) {
+            defaultPkColumn = await promptForPkColumn(rl, e.schema, entityKey);
+        }
+        const pkCol = await askInlinePrefilled(
+            rl,
+            `(${entityKey}) PK column for existing ${entityKey}:`,
+            defaultPkColumn || ''
+        );
+        routes.update.params = [{name: 'id', column: pkCol}];
+        const uwrap = await askInlinePrefilled(rl, `(${entityKey}) UPDATE JSON payload wrapper (blank = none):`, e.payload.update.jsonPayloadWrapper || '');
+        e.payload.update.jsonPayloadWrapper = uwrap ? uwrap : null;
+
+    }
+
+    // ==== GET ====
+    routes.get.method = await promptMethod('GET', routes.get.method);
+    routes.get.path   = await promptPath('GET',  routes.get.path);
+    if (routes.get.path) {
+        routes.get.params = await promptSlugMapping('GET', routes.get.path, routes.get.params);
+    }
 
     console.log('');
 }
@@ -708,33 +818,148 @@ function getSlugFillsForPath(path, paramsArr) {
  */
 function printSummary(e, entityKey) {
     const host = e?.routes?.host || '';
+
     const cm = (e?.routes?.create?.method || 'POST').toUpperCase();
     const cp = (e?.routes?.create?.path || '');
+
     const um = (e?.routes?.update?.method || 'POST').toUpperCase();
     const up = (e?.routes?.update?.path || '');
     const uparams = e?.routes?.update?.params || [];
 
+    const gm = (e?.routes?.get?.method || 'GET').toUpperCase();
+    const gp = (e?.routes?.get?.path || '');
+
     const cSlugMap = getSlugFillsForPath(cp, e?.routes?.create?.params || []);
     const uSlugMap = getSlugFillsForPath(up, uparams);
-
-    console.log("");
-    console.log(`Current SUMMARY for ${entityKey}:`);
-    console.log(`  host                              : ${host}`);
-    console.log(`  create                            : ${cm} ${cp}`);
-    console.log(`  update                            : ${um} ${up}`);
-    console.log(`  create JSON payload data wrapper  : ${e?.payload?.create?.jsonPayloadWrapper || '(none)'}`);
-    console.log(`  create JSON payload data wrapper  : ${e?.payload?.update?.jsonPayloadWrapper || '(none)'}`);
-    const idParam = uparams[0];
-    if (idParam) console.log(`  UPDATE param "id" column: ${idParam.column || '(not set)'}`);
+    const gSlugMap = getSlugFillsForPath(gp, e?.routes?.get?.params || []);
 
     const cSlugs = Object.keys(cSlugMap);
     const uSlugs = Object.keys(uSlugMap);
-    if (cSlugs.length || uSlugs.length) {
-        console.log('  slug fills :');
-        for (const k of cSlugs) console.log(`    (create) :${k} ← ${cSlugMap[k] || '(not set)'}`);
-        for (const k of uSlugs) console.log(`    (update) :${k} ← ${uSlugMap[k] || '(not set)'}`);
-    }
+    const gSlugs = Object.keys(gSlugMap);
 
+    console.log("");
+    console.log(`Current SUMMARY for ${entityKey}:`);
+    console.log(`  Host                                     : ${host}`);
+    console.log("");
+    console.log(`  CREATE route                             : ${cm} ${cp}`);
+    if (cp) {
+        if (cSlugs.length) {
+            console.log('  slug fills :');
+            for (const k of cSlugs) console.log(`    (create) :${k} ← ${cSlugMap[k] || '(not set)'}`);
+        }
+        const idParam = uparams[0];
+        if (idParam) {
+            const entLabel = entityKey || 'record';
+            console.log(`  PK column for existing ${entLabel.padEnd(18)}: ${idParam.column || '(not set)'}`);
+        }
+        console.log(`  CREATE JSON payload data wrapper         : ${e?.payload?.create?.jsonPayloadWrapper || '(none)'}`);
+    }
+    console.log("");
+    console.log(`  UPDATE route                             : ${um} ${up}`);
+    if (up) {
+        if (uSlugs.length) {
+            console.log('    slug fills :');
+            for (const k of uSlugs) console.log(`      (update) :${k} ← ${uSlugMap[k] || '(not set)'}`);
+        }
+        console.log(`  UPDATE JSON payload data wrapper         : ${e?.payload?.update?.jsonPayloadWrapper || '(none)'}`);
+    }
+    console.log("");
+    console.log(`  GET route                                : ${gm} ${gp}`);
+    if (gp) {
+        if (gSlugs.length) {
+            console.log('  slug fills :');
+            for (const k of gSlugs) console.log(`    (get)    :${k} ← ${gSlugMap[k] || '(not set)'}`);
+        }
+    }
+}
+
+/**
+ * Prints formatted tables of query string parameters for the given entity.
+ *
+ * This output mirrors the layout and style of printHeaders(), showing
+ * up to three labeled tables for CREATE, UPDATE, and GET querystrings.
+ *
+ * @function printQueryStrings
+ * @param {object} entity - The entity definition object containing route data.
+ * @param {string} entityKey - The key (name) of the entity being printed.
+ * @returns {void}
+ *
+ */
+function printQueryStrings(entity, entityKey) {
+    try {
+        const cq = Array.isArray(entity?.routes?.create?.query) ? entity.routes.create.query : [];
+        const uq = Array.isArray(entity?.routes?.update?.query) ? entity.routes.update.query : [];
+        const gq = Array.isArray(entity?.routes?.get?.query)    ? entity.routes.get.query    : [];
+
+        const sanitizeQuery = (arr) => {
+            if (!Array.isArray(arr)) return [];
+            return arr
+                .map(q => ({
+                    name:   String(q?.name ?? '').trim(),
+                    column: (q && 'column' in q && q.column != null) ? String(q.column).trim() : undefined,
+                    value:  (q && 'value'  in q && q.value  != null) ? String(q.value ).trim() : undefined
+                }))
+                .filter(q => q.name);
+        };
+
+        const signature = (arr) => {
+            const rows = [];
+            for (const q of sanitizeQuery(arr)) {
+                rows.push([q.name.toLowerCase(), q.column ? `column:${q.column}` : `value:${q.value ?? ''}`]);
+            }
+            rows.sort((a,b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+            return JSON.stringify(rows);
+        };
+
+        const cDisp = sanitizeQuery(cq);
+        const uDisp = sanitizeQuery(uq);
+        const gDisp = sanitizeQuery(gq);
+
+        const sigC = signature(cq);
+        const sigU = signature(uq);
+        const sigG = signature(gq);
+
+        const allEmpty = cDisp.length === 0 && uDisp.length === 0 && gDisp.length === 0;
+        const allSame  = sigC === sigU && sigC === sigG;
+
+        if (allSame) {
+            console.log(`\nCurrent QUERYSTRINGS for ${entityKey} — All`);
+            if (allEmpty) {
+                console.log('(none)');
+            } else {
+                printTable(
+                    ['#', 'Name', 'Mapping'],
+                    cDisp.map((q,i)=>[String(i+1), q.name, q.column ? `column:${q.column}` : `value:${q.value ?? ''}`])
+                );
+            }
+            return;
+        }
+
+        // Print each set separately
+        console.log(`\nCurrent QUERYSTRINGS for ${entityKey} — CREATE`);
+        if (cDisp.length) {
+            printTable(['#', 'Name', 'Mapping'], cDisp.map((q,i)=>[String(i+1), q.name, q.column ? `column:${q.column}` : `value:${q.value ?? ''}`]));
+        } else {
+            console.log('(none)');
+        }
+
+        console.log(`\nCurrent QUERYSTRINGS for ${entityKey} — UPDATE`);
+        if (uDisp.length) {
+            printTable(['#', 'Name', 'Mapping'], uDisp.map((q,i)=>[String(i+1), q.name, q.column ? `column:${q.column}` : `value:${q.value ?? ''}`]));
+        } else {
+            console.log('(none)');
+        }
+
+        console.log(`\nCurrent QUERYSTRINGS for ${entityKey} — GET`);
+        if (gDisp.length) {
+            printTable(['#', 'Name', 'Mapping'], gDisp.map((q,i)=>[String(i+1), q.name, q.column ? `column:${q.column}` : `value:${q.value ?? ''}`]));
+        } else {
+            console.log('(none)');
+        }
+    } catch (e) {
+        console.log(`\nCurrent QUERYSTRINGS for ${entityKey}:`);
+        console.log('(error rendering querystrings table)');
+    }
 }
 
 /**
@@ -748,52 +973,89 @@ function printSummary(e, entityKey) {
  */
 function printHeaders(entity, entityKey) {
     try {
+        const rawC = entity?.routes?.create?.headers || [];
+        const rawU = entity?.routes?.update?.headers || [];
+        const rawG = entity?.routes?.get?.headers    || [];
 
-        const ch = sanitizeHeaders(entity?.routes?.create?.headers);
-        const uh = sanitizeHeaders(entity?.routes?.update?.headers);
-
-        /**
-         * sig — build a normalized signature string for a header entry.
-         * Used to detect duplicates regardless of case/whitespace differences.
-         *
-         * @param {{name:string, value:string}} arr - Single header object.
-         * @returns {string} Normalized signature.
-         */
-        const sig = (arr) => {
-            const pairs = [];
-            for (const h of (Array.isArray(arr) ? arr : [])) {
-                const name = String(h?.name || '').trim().toLowerCase();
-                const value = String(h?.value ?? '').trim();
-                if (!name) continue;
-                pairs.push([name, value]);
-            }
-            pairs.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
-            return JSON.stringify(pairs);
+        const sanitizeDisplay = (arr) => {
+            if (!Array.isArray(arr)) return [];
+            return arr
+                .map(h => ({
+                    name: String(h?.name ?? '').trim(),
+                    value: String(h?.value ?? '').trim()
+                }))
+                .filter(h => h.name);
         };
 
-        const same = sig(ch) === sig(uh);
+        const signature = (arr) => {
+            const rows = [];
+            for (const h of (Array.isArray(arr) ? arr : [])) {
+                const name  = String(h?.name ?? '').trim().toLowerCase();
+                const value = String(h?.value ?? '').trim();
+                if (!name) continue;
+                rows.push([name, value]);
+            }
+            rows.sort((a,b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+            return JSON.stringify(rows);
+        };
 
-        /**
-         * rows — map headers to printable table rows.
-         * Formats each header as [name, value] for the CLI table renderer.
-         *
-         * @param {Array<{name:string,value:string}>} arr - Headers array.
-         * @returns {Array<Array<string>>} Table rows for display.
-         */
-        const rows = (arr) => (arr || []).map((h, i) => [String(i + 1), h.name, h.value]);
+        const cDisp = sanitizeDisplay(rawC);
+        const uDisp = sanitizeDisplay(rawU);
+        const gDisp = sanitizeDisplay(rawG);
+        const sigC = signature(rawC);
+        const sigU = signature(rawU);
+        const sigG = signature(rawG);
 
-        if (same) {
-            console.log(`\nCurrent HEADERS for ${entityKey} — CREATE & UPDATE (identical)`);
-            printTable(['#', 'Name', 'Value'], rows(ch));
+        const allEmpty = cDisp.length === 0 && uDisp.length === 0 && gDisp.length === 0;
+        const allSame  = sigC === sigU && sigC === sigG;
+
+        if (allSame) {
+            console.log(`\nCurrent HEADERS for ${entityKey} — All`);
+            if (allEmpty) {
+                console.log('(none)');
+            } else {
+                const tableRows = cDisp.map((h, i) => [String(i + 1), h.name, h.value]);
+                printTable(['#', 'Name', 'Value'], tableRows);
+            }
+            return;
+        }
+
+        // Print each set separately
+        console.log(`\nCurrent HEADERS for ${entityKey} — CREATE`);
+        if (cDisp.length) {
+            printTable(['#', 'Name', 'Value'], cDisp.map((h,i)=>[String(i+1), h.name, h.value]));
         } else {
-            console.log(`\nCurrent HEADERS for ${entityKey} — CREATE`);
-            printTable(['#', 'Name', 'Value'], rows(ch));
-            console.log(`\nCurrent HEADERS for ${entityKey} — UPDATE`);
-            printTable(['#', 'Name', 'Value'], rows(uh));
+            console.log('(none)');
+        }
+
+        console.log(`\nCurrent HEADERS for ${entityKey} — UPDATE`);
+        if (uDisp.length) {
+            printTable(['#', 'Name', 'Value'], uDisp.map((h,i)=>[String(i+1), h.name, h.value]));
+        } else {
+            console.log('(none)');
+        }
+
+        console.log(`\nCurrent HEADERS for ${entityKey} — GET`);
+        if (gDisp.length) {
+            printTable(['#', 'Name', 'Value'], gDisp.map((h,i)=>[String(i+1), h.name, h.value]));
+        } else {
+            console.log('(none)');
+        }
+
+        const sameCU = sigC === sigU;
+        const sameCG = sigC === sigG;
+        const sameUG = sigU === sigG;
+
+        if (!allSame && (sameCU || sameCG || sameUG)) {
+            const pairs = [];
+            if (sameCU) pairs.push('CREATE & UPDATE');
+            if (sameCG) pairs.push('CREATE & GET');
+            if (sameUG) pairs.push('UPDATE & GET');
+            console.log(`\nNote: ${pairs.join(' | ')} headers are identical.`);
         }
     } catch (e) {
         console.log(`\nCurrent HEADERS for ${entityKey}:`);
-        console.log('(unable to render headers table)', e?.message || e);
+        console.log('(error rendering headers table)');
     }
 }
 
@@ -809,39 +1071,113 @@ function printHeaders(entity, entityKey) {
  */
 async function harFlow(rl, cfg, entityKey) {
     const ent = cfg.entities[entityKey];
+
+    // HAR path prompt + remember
     const prefillHar = (ent.sources?.harPath || cfg.sourcesLastUsed?.harPath || '');
     const harPath = await askExistingPathPrefill(rl, `(${entityKey}) Path to sample HAR file`, prefillHar);
-    rememberSourcePaths(cfg, entityKey, {harPath});
+    rememberSourcePaths(cfg, entityKey, { harPath });
     saveConfigClean(cfg);
+
+    // Load + summarize
     const har = loadHar(harPath);
     const entries = harvestEntries(har);
     const summary = harSummary(entries);
+
+    // Host picker
     const hostChoice = await pickHostRequireChoice(rl, summary.hosts, entityKey);
-    const createChoice = await pickRouteRequireChoice(rl, summary.routesByMethodPath['POST'] || [], `the CREATE API call example from the example har for ${entityKey}`);
-    const updateChoice = await pickRouteRequireChoice(rl, summary.routesByMethodPath['POST'] || [], `the UPDATE API call example from the example har for ${entityKey}`);
 
-    ent.routes = ent.routes || {host: null, create: {}, update: {}};
+    // CREATE candidates (POST-only for create UX)
+    const createCandidates =
+        (summary.routesByMethodPath['POST'] || []).concat(summary.routesByMethodPath['post'] || []);
+    const createChoice = await pickRouteRequireChoice(
+        rl,
+        createCandidates,
+        `CREATE API call example from the example har for ${entityKey}`
+    );
+
+    // UPDATE candidates (POST/PUT/PATCH)
+    const updateCandidates = []
+        .concat(summary.routesByMethodPath['POST']  || [])
+        .concat(summary.routesByMethodPath['PUT']   || [])
+        .concat(summary.routesByMethodPath['PATCH'] || []);
+    const updateChoice = await pickRouteRequireChoice(
+        rl,
+        updateCandidates,
+        `UPDATE API call example from the example har for ${entityKey}`
+    );
+
+    // Optional GET
+    const getCandidates =
+        (summary.routesByMethodPath['GET'] || []).concat(summary.routesByMethodPath['get'] || []);
+    const getChoice = getCandidates.length
+        ? await pickRouteRequireChoice(rl, getCandidates, `GET API call example from the example har for ${entityKey}`)
+        : null;
+    if (!getChoice) {
+        console.log(`\n(No GET requests found in this HAR; you can set GET later via Summary/Query editors.)\n`);
+    }
+
+    // Normalize route shells (non-breaking)
+    ent.routes = ent.routes || { host: null, create: {}, update: {}, get: { method: 'GET', params: [], query: [], headers: [] } };
     ent.routes.host = hostChoice;
+
+    // CREATE path/method
     ent.routes.create = ent.routes.create || {};
-    ent.routes.update = ent.routes.update || {};
     ent.routes.create.method = 'POST';
-    ent.routes.create.path = createChoice.path;
-    ent.routes.update.method = 'POST';
-    ent.routes.update.path = templateUpdatePathForDisplay(updateChoice.path);
+    ent.routes.create.path   = createChoice.path;
 
-    const oneCreate = findMostRecentMatching(entries, 'POST', createChoice.path);
-    const oneUpdate = findMostRecentMatching(entries, 'POST', updateChoice.path);
+    // UPDATE path/method (preserve your display templating for /id/:id)
+    ent.routes.update = ent.routes.update || {};
+    ent.routes.update.method = (String(updateChoice.method || 'POST')).toUpperCase();
+    ent.routes.update.path   = templateUpdatePathForDisplay(updateChoice.path);
 
-    if (oneCreate) {
-        const analysisC = analyzeSingleEntry(oneCreate, ent, 'create');
-        applyAnalysis(ent, analysisC, 'create');
+    // GET path/method
+    ent.routes.get = ent.routes.get || { method: 'GET', params: [], query: [], headers: [] };
+    if (getChoice) {
+        ent.routes.get.method = 'GET';
+        ent.routes.get.path   = getChoice.path;
     }
-    if (oneUpdate) {
-        const analysisU = analyzeSingleEntry(oneUpdate, ent, 'update');
-        applyAnalysis(ent, analysisU, 'update');
-        suggestUpdateIdParam(ent);
-        biasServerGeneratedFromIdParam(ent);
+
+    // Suggest headers from the most recent example for each chosen route (non-destructive)
+    const chooseLatest = (m, p) => findMostRecentMatching(entries, m, p);
+    const toHeaderArray = (hdrs) => sanitizeHeaders(hdrs || []);
+
+    const cEntry = chooseLatest(ent.routes.create.method, createChoice.path);
+    if (cEntry) {
+        const cHeaders = toHeaderArray(cEntry?.req?.headers);
+        if (Array.isArray(cHeaders) && cHeaders.length) ent.routes.create.headers = cHeaders;
     }
+
+    const uEntry = chooseLatest(ent.routes.update.method, updateChoice.path);
+    if (uEntry) {
+        const uHeaders = toHeaderArray(uEntry?.req?.headers);
+        if (Array.isArray(uHeaders) && uHeaders.length) ent.routes.update.headers = uHeaders;
+    }
+
+    if (getChoice) {
+        const gEntry = chooseLatest('GET', getChoice.path);
+        if (gEntry) {
+            const gHeaders = toHeaderArray(gEntry?.req?.headers);
+            if (Array.isArray(gHeaders) && gHeaders.length) ent.routes.get.headers = gHeaders;
+        }
+    }
+
+    // === Restore old working behavior: analyze + applyAnalysis for CREATE/UPDATE ===
+    try {
+        if (cEntry) {
+            const analysisC = analyzeSingleEntry(cEntry, ent, 'create');
+            if (analysisC) applyAnalysis(ent, analysisC, 'create');
+        }
+        if (uEntry) {
+            const analysisU = analyzeSingleEntry(uEntry, ent, 'update');
+            if (analysisU) applyAnalysis(ent, analysisU, 'update');
+        }
+    } catch {
+        // non-fatal
+    }
+
+    // Keep the helpful post-biasing that used to happen here
+    try { if (typeof suggestUpdateIdParam === 'function') suggestUpdateIdParam(ent); } catch {}
+    try { if (typeof biasServerGeneratedFromIdParam === 'function') biasServerGeneratedFromIdParam(ent); } catch {}
 }
 
 /**
@@ -1396,100 +1732,327 @@ function rememberSourcePaths(cfg, entityKey, paths) {
 }
 
 /**
- * headersEditor — interactive editor for entity request headers.
- * Lets the user view, add, modify, or remove headers for create/update routes,
- * sanitizing on exit and saving back into the configuration.
- *
- * @param {any} rl - Readline interface for prompts.
- * @param {Object} cfg - Configuration containing the target entity.
- * @param {string} entityKey - Entity being edited.
- * @returns {Promise<void>}
+ * headersEditor — header-only editor invoked from the main T/H/S/Q/X menu.
+ * Flow:
+ *  - Ask which scope: (C)REATE, (U)PDATE, (G)ET, or (A)LL.
+ *  - For C/U/G: go directly into a simple table editor loop for that route.
+ *  - For A: unify headers across C+U+G, then every change applies to all three.
+ *  - e[X]it always returns to the main menu (no inner route switch, no sync cmd).
  */
 async function headersEditor(rl, cfg, entityKey) {
     const ent = cfg.entities[entityKey];
-    ent.routes = ent.routes || {create: {headers: []}, update: {headers: []}};
-    ent.routes.create = ent.routes.create || {headers: []};
-    ent.routes.update = ent.routes.update || {headers: []};
-    ent.routes.create.headers = Array.isArray(ent.routes.create.headers) ? ent.routes.create.headers : [];
-    ent.routes.update.headers = Array.isArray(ent.routes.update.headers) ? ent.routes.update.headers : [];
 
-    const scopeAns = (await askWithDefault(rl, `Edit (C)REATE, (U)PDATE, or (B)OTH headers?`, 'B')).trim().toUpperCase();
-    const scope = scopeAns.startsWith('C') ? 'C' : scopeAns.startsWith('U') ? 'U' : 'B';
-
-    let masterSide = scope;
-    if (scope === 'B') {
-        const chLen = ent.routes.create.headers.length;
-        const uhLen = ent.routes.update.headers.length;
-        masterSide = (uhLen > chLen) ? 'U' : 'C';
+    // Ensure scaffolds
+    ent.routes = ent.routes || {
+        create: { headers: [], params: [], query: [] },
+        update: { headers: [], params: [], query: [] },
+        get:    { method: 'GET', headers: [], params: [], query: [] }
+    };
+    for (const k of ['create','update','get']) {
+        ent.routes[k] = ent.routes[k] || {};
+        ent.routes[k].headers = Array.isArray(ent.routes[k].headers) ? ent.routes[k].headers : [];
+        ent.routes[k].params  = Array.isArray(ent.routes[k].params)  ? ent.routes[k].params  : [];
+        ent.routes[k].query   = Array.isArray(ent.routes[k].query)   ? ent.routes[k].query   : [];
+        if (!ent.routes[k].method && k === 'get') ent.routes[k].method = 'GET';
     }
 
-    let headers = masterSide === 'U' ? ent.routes.update.headers : ent.routes.create.headers;
+    // Choose scope once; no nested re-prompting or route switching
+    const scopeAns = (await askWithDefault(
+        rl,
+        `Edit which headers? (C)REATE, (U)PDATE, (G)ET, or (A)LL [A]:`,
+        'A'
+    )).trim().toUpperCase();
+    const scope = scopeAns.startsWith('C') ? 'C'
+        : scopeAns.startsWith('U') ? 'U'
+            : scopeAns.startsWith('G') ? 'G'
+                : 'A';
+
+    // Sanitizer: trim, de-dup by case-insensitive name + exact value, keep order
+    function sanitizeHeaders(arr) {
+        if (!Array.isArray(arr)) return [];
+        const seen = new Set();
+        const out = [];
+        for (const h of arr) {
+            const name = String(h?.name ?? '').trim();
+            const value = String(h?.value ?? '').trim();
+            if (!name) continue;
+            const key = name.toLowerCase() + '\u0001' + value;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({ name, value });
+        }
+        return out;
+    }
+
+    function showTable(label, arr) {
+        const rows = (arr || []).map((h, i) => [String(i + 1), h?.name || '', h?.value || '']);
+        console.log(`\nHEADERS — ${entityKey} / ${label}`);
+        if (rows.length) {
+            printTable(['#', 'Name', 'Value'], rows);
+        } else {
+            console.log('(none)');
+        }
+    }
+
+    async function addItem(arr) {
+        const name  = await askInlinePrefilled(rl, `(${entityKey}) Header name:`, '');
+        const trimmed = String(name || '').trim();
+        if (!trimmed) return;
+        const value = await askInlinePrefilled(rl, `(${entityKey}) Header value:`, '');
+        arr.push({ name: trimmed, value: String(value || '').trim() });
+    }
+    async function editItem(arr) {
+        if (!arr.length) { console.log('(empty)'); return; }
+        const idxRaw = await askInlinePrefilled(rl, '# to edit (1..n)', '1');
+        const idx = Math.max(1, parseInt(idxRaw, 10)) - 1;
+        if (!(idx in arr)) { console.log('Invalid row.'); return; }
+        const cur   = arr[idx] || {};
+        const name  = await askInlinePrefilled(rl, `(${entityKey}) Header name:`,  cur?.name  || '');
+        const value = await askInlinePrefilled(rl, `(${entityKey}) Header value:`, cur?.value || '');
+        if (String(name).trim()) arr[idx] = { name: String(name).trim(), value: String(value || '').trim() };
+    }
+    async function deleteItem(arr) {
+        if (!arr.length) { console.log('(empty)'); return; }
+        const idxRaw = await askInlinePrefilled(rl, '# to delete (1..n)', '1');
+        const idx = Math.max(1, parseInt(idxRaw, 10)) - 1;
+        if (!(idx in arr)) { console.log('Invalid row.'); return; }
+        arr.splice(idx, 1);
+    }
+
+    if (scope === 'A') {
+        // Unify: start from the longest set, then write to all three immediately
+        const sizes = [
+            ['create', ent.routes.create.headers.length],
+            ['update', ent.routes.update.headers.length],
+            ['get',    ent.routes.get.headers.length],
+        ].sort((a,b) => b[1]-a[1]);
+        let all = JSON.parse(JSON.stringify(ent.routes[sizes[0][0]].headers || []));
+        // Apply the unified baseline to all three
+        ent.routes.create.headers = JSON.parse(JSON.stringify(all));
+        ent.routes.update.headers = JSON.parse(JSON.stringify(all));
+        ent.routes.get.headers    = JSON.parse(JSON.stringify(all));
+
+        while (true) {
+            showTable('ALL', all);
+            console.log('\n[a] add   [e] edit   [d] delete   e[X]it');
+            const cmd = (await askWithDefault(rl, 'headers> ', '')).trim().toUpperCase();
+            if (!cmd) continue;
+            if (cmd === 'X' || cmd === 'EXIT') break;
+            if (cmd === 'A') { await addItem(all);    }
+            else if (cmd === 'E') { await editItem(all);   }
+            else if (cmd === 'D') { await deleteItem(all); }
+            else { console.log('Unknown command.'); continue; }
+
+            // Reflect every change into all three immediately
+            const cleaned = sanitizeHeaders(all);
+            all = cleaned;
+            ent.routes.create.headers = JSON.parse(JSON.stringify(cleaned));
+            ent.routes.update.headers = JSON.parse(JSON.stringify(cleaned));
+            ent.routes.get.headers    = JSON.parse(JSON.stringify(cleaned));
+        }
+
+        // Final sanitize and persist on exit
+        const cleaned = sanitizeHeaders(all);
+        ent.routes.create.headers = JSON.parse(JSON.stringify(cleaned));
+        ent.routes.update.headers = JSON.parse(JSON.stringify(cleaned));
+        ent.routes.get.headers    = JSON.parse(JSON.stringify(cleaned));
+        return;
+    }
+
+    // Single route path (no route switching inside)
+    const k = (scope === 'U') ? 'update' : (scope === 'G' ? 'get' : 'create');
+    let arr = ent.routes[k].headers;
 
     while (true) {
-        const rows = headers.map((h, i) => [String(i + 1), h?.name || '', h?.value || '']);
-        console.log(`\nCurrent HEADERS for ${entityKey} — ${masterSide === 'C' ? 'CREATE' : 'UPDATE'}`);
-        printTable(['#', 'Name', 'Value'], rows);
+        showTable(k.toUpperCase(), arr);
+        console.log('\n[a] add   [e] edit   [d] delete   e[X]it');
+        const cmd = (await askWithDefault(rl, 'headers> ', '')).trim().toUpperCase();
+        if (!cmd) continue;
+        if (cmd === 'X' || cmd === 'EXIT') break;
+        if (cmd === 'A') { await addItem(arr);    }
+        else if (cmd === 'E') { await editItem(arr);   }
+        else if (cmd === 'D') { await deleteItem(arr); }
+        else { console.log('Unknown command.'); continue; }
+        arr = sanitizeHeaders(arr);
+        ent.routes[k].headers = arr;
+    }
 
-        console.log('');
-        console.log('Commands:');
-        console.log(`  <row# | name>     (edit this header)`);
-        console.log('  [A]DD             (add a new header)');
-        console.log('  [D]EL <#|name>    (delete a header)');
-        console.log('  Q                 (Quit Headers Editor)');
-        console.log('');
+    // Final sanitize and persist on exit
+    ent.routes[k].headers = sanitizeHeaders(ent.routes[k].headers);
+}
 
-        const line = (await askWithDefault(rl, ' (#,A,D,Q): ', 'Q')).trim();
-        if (!line) continue;
-        if (/^(q|quit)$/i.test(line)) {
+/**
+ * queryStringEditor — interactive editor for routes.*.query on CREATE/UPDATE/GET.
+ * Mirrors the headers editor UX: list, add, edit, delete. Values can be static or mapped to a column.
+ *
+ * @param {any} rl
+ * @param {Object} cfg
+ * @param {string} entityKey
+ * @returns {Promise<void>}
+ */
+async function queryStringEditor(rl, cfg, entityKey) {
+    const ent = cfg.entities[entityKey];
+    ent.routes = ent.routes || {};
+    ent.routes.create = ent.routes.create || {query: []};
+    ent.routes.update = ent.routes.update || {query: []};
+    ent.routes.get = ent.routes.get || {method: 'GET', query: []};
 
-            headers = sanitizeHeaders(headers);
-            if (scope === 'B') {
-                ent.routes.create.headers = headers.slice();
-                ent.routes.update.headers = headers.slice();
-            } else if (masterSide === 'C') {
-                ent.routes.create.headers = headers.slice();
-            } else {
-                ent.routes.update.headers = headers.slice();
-            }
+    // Normalize arrays
+    for (const k of ['create', 'update', 'get']) {
+        ent.routes[k].query = Array.isArray(ent.routes[k].query) ? ent.routes[k].query : [];
+    }
+
+    // Utility to sanitize one query array into stable signature for equality checks
+    const normSig = (arr) => {
+        const rows = [];
+        for (const q of (Array.isArray(arr) ? arr : [])) {
+            const name = String(q?.name ?? '').trim().toLowerCase();
+            if (!name) continue;
+            const mapping = (q && 'column' in q && q.column != null)
+                ? `column:${String(q.column).trim()}`
+                : `value:${String(q?.value ?? '').trim()}`;
+            rows.push([name, mapping]);
+        }
+        rows.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+        return JSON.stringify(rows);
+    };
+
+    const sigC = normSig(ent.routes.create.query);
+    const sigU = normSig(ent.routes.update.query);
+    const sigG = normSig(ent.routes.get.query);
+    const allSame = (sigC === sigU && sigC === sigG);
+
+    // Route selection prompt — include (A) only when all three sets are identical
+    const scopePrompt = allSame
+        ? `Edit which querystrings? (C)REATE, (U)PDATE, (G)ET, or (A)LL [U]: `
+        : `Edit which querystrings? (C)REATE, (U)PDATE, or (G)ET [U]: `;
+
+    const scopeAns = (await askWithDefault(rl, scopePrompt, 'U')).trim().toUpperCase();
+    const scope = (allSame && scopeAns.startsWith('A')) ? 'A'
+        : scopeAns.startsWith('C') ? 'C'
+            : scopeAns.startsWith('G') ? 'G'
+                : 'U';
+
+    // Helper to render a single table (like printQueryStrings does)
+    function printOne(k) {
+        const arr = ent.routes[k].query || [];
+        if (!arr.length) {
+            console.log('(none)');
             return;
         }
+        const rows = arr.map((q, i) => [
+            String(i + 1),
+            String(q?.name ?? ''),
+            (q && 'column' in q && q.column != null)
+                ? `column:${String(q.column)}`
+                : `value:${String(q?.value ?? '')}`
+        ]);
+        printTable(['#', 'Name', 'Mapping'], rows);
+    }
 
-        if (/^(a|add)$/i.test(line)) {
-            const name = await askInlinePrefilled(rl, `(${entityKey}) Header name:`, '');
-            const value = await askInlinePrefilled(rl, `(${entityKey}) Header value:`, '');
-            if (String(name).trim()) headers.push({name: String(name).trim(), value: String(value || '')});
-            continue;
-        }
-
-        if (/^(d|del)\s+/i.test(line)) {
-            const arg = line.replace(/^(d|del)\s+/i, '').trim();
-            let idx = -1;
-            if (/^\d+$/.test(arg)) {
-                idx = parseInt(arg, 10) - 1;
-            } else {
-                idx = headers.findIndex(h => String(h?.name || '').toLowerCase() === arg.toLowerCase());
-            }
-            if (idx >= 0 && idx < headers.length) headers.splice(idx, 1);
-            continue;
-        }
-
-        let idx = -1;
-        if (/^\d+$/.test(line)) {
-            idx = parseInt(line, 10) - 1;
+    // CRUD helpers
+    async function addItem(k) {
+        const name = await askInlinePrefilled(rl, 'QueryString Parameter name:', '');
+        const trimmed = String(name || '').trim();
+        if (!trimmed) return;
+        const mapCol = await askYesNo(rl, `Map "${trimmed}" to a schema column?`, false);
+        if (mapCol) {
+            const column = await askInlinePrefilled(rl, 'Column name', '');
+            ent.routes[k].query.push({name: trimmed, column: String(column || '').trim()});
         } else {
-            idx = headers.findIndex(h => String(h?.name || '').toLowerCase() === line.toLowerCase());
+            const value = await askInlinePrefilled(rl, 'Static value', '');
+            ent.routes[k].query.push({name: trimmed, value: String(value || '').trim()});
         }
-        if (idx >= 0 && idx < headers.length) {
-            const cur = headers[idx];
-            const name = await askInlinePrefilled(rl, `(${entityKey}) Header name:`, cur?.name || '');
-            const value = await askInlinePrefilled(rl, `(${entityKey}) Header value:`, cur?.value || '');
-            if (String(name).trim()) {
-                headers[idx] = {name: String(name).trim(), value: String(value || '')};
-            }
-            continue;
-        }
+    }
 
-        console.log('Unknown input.');
+    async function editItem(k) {
+        const arr = ent.routes[k].query || [];
+        if (!arr.length) {
+            console.log('(empty)');
+            return;
+        }
+        const idxRaw = await askInlinePrefilled(rl, 'Row # to edit', '1');
+        const idx = Math.max(1, parseInt(idxRaw, 10)) - 1;
+        if (!(idx in arr)) {
+            console.log('Invalid row.');
+            return;
+        }
+        const cur = arr[idx] || {};
+        const name = await askInlinePrefilled(rl, 'QueryString Parameter name:', cur.name || '');
+        const useCol = await askYesNo(rl, `Map "${name}" to a schema column?`, !!cur.column);
+        if (useCol) {
+            const column = await askInlinePrefilled(rl, 'Column name', cur.column || '');
+            ent.routes[k].query[idx] = {name, column: String(column || '').trim()};
+        } else {
+            const value = await askInlinePrefilled(rl, 'Static value', cur.value || '');
+            ent.routes[k].query[idx] = {name, value: String(value || '').trim()};
+        }
+    }
+
+    async function deleteItem(k) {
+        const arr = ent.routes[k].query || [];
+        if (!arr.length) {
+            console.log('(empty)');
+            return;
+        }
+        const idxRaw = await askInlinePrefilled(rl, 'Row # to delete', '1');
+        const idx = Math.max(1, parseInt(idxRaw, 10)) - 1;
+        if (!(idx in arr)) {
+            console.log('Invalid row.');
+            return;
+        }
+        arr.splice(idx, 1);
+    }
+
+    // Edit session
+    if (scope === 'A') {
+        // All-mode: apply every change to C+U+G immediately
+        while (true) {
+            console.log(`\nEditing ${entityKey} / QUERYSTRINGS — ALL`);
+            // Show a single canonical table (use CREATE as representative)
+            printOne('create');
+            console.log('[a] add   [e] edit   [d] delete   e[X]it');
+            const cmd = (await askWithDefault(rl, '> ', '')).trim().toUpperCase();
+            if (!cmd) continue;
+            if (cmd === 'X' || cmd === 'EXIT') break;
+            if (cmd === 'A') {
+                // add to all three
+                for (const k of ['create', 'update', 'get']) await addItem(k);
+                continue;
+            }
+            if (cmd === 'E') {
+                for (const k of ['create', 'update', 'get']) await editItem(k);
+                continue;
+            }
+            if (cmd === 'D') {
+                for (const k of ['create', 'update', 'get']) await deleteItem(k);
+                continue;
+            }
+            console.log('Unknown command.');
+        }
+    } else {
+        const k = (scope === 'C') ? 'create' : (scope === 'G') ? 'get' : 'update';
+        while (true) {
+            console.log(`\nEditing ${entityKey} / QUERYSTRINGS — ${k.toUpperCase()}`);
+            printOne(k);
+            console.log('[a] add   [e] edit   [d] delete   e[X]it');
+            const cmd = (await askWithDefault(rl, '> ', '')).trim().toUpperCase();
+            if (!cmd) continue;
+            if (cmd === 'X' || cmd === 'EXIT') break;
+            if (cmd === 'A') {
+                await addItem(k);
+                continue;
+            }
+            if (cmd === 'E') {
+                await editItem(k);
+                continue;
+            }
+            if (cmd === 'D') {
+                await deleteItem(k);
+                continue;
+            }
+            console.log('Unknown command.');
+        }
     }
 }
 
@@ -1711,12 +2274,12 @@ Regex help examples:
         console.log('  [D]EL <#|columnName>    (delete that row; asks for confirmation, default = N)');
         console.log('  [B]ACKFILL              (auto-copy from more-populated side; ask only on conflicts)');
         console.log('  CREATE[R]EGEX           (propose GenRegex for email/phone/zip/state columns)');
-        console.log('  Q                       (Quit Table Editor)');
+        console.log('  X                       (eXit Table Editor)');
         console.log("");
 
-        const line = (await askWithDefault(rl, 'Command (#,A,D,B,R,Q): ', 'Q')).trim();
+        const line = (await askWithDefault(rl, 'Command (#,A,D,B,R,X): ', 'X')).trim();
         if (!line) continue;
-        if (/^(q|quit)$/i.test(line)) return;
+        if (/^(q|quit|x|exit)$/i.test(line)) return;
 
         if (/^(b|backfill)$/i.test(line)) {
             const {filledCreate, filledUpdate} = await runBackfill(entity);
@@ -1881,7 +2444,7 @@ Regex help examples:
  * entries were filled automatically.
  *
  * @param {Object} entity - Entity object containing schema to update.
- * @returns {void}
+ * @returns {Promise<{filledCreate: number, filledUpdate: number}>}
  */
 async function runBackfill(entity) {
     const cols = entity.schema || [];

@@ -57,9 +57,7 @@ PURPOSE
  * @returns {void}
  */
 function printTable(headers, rows) {
-    const widths = headers.map((h, i) =>
-        Math.max(String(h).length, ...rows.map(r => (String(r[i] ?? '')).length))
-    );
+    const widths = headers.map((h, i) => Math.max(String(h).length, ...rows.map(r => (String(r[i] ?? '')).length)));
     const pad = (s, w) => (String(s)).padEnd(w, ' ');
     const lineTop = '┌' + widths.map(w => '─'.repeat(w + 2)).join('┬') + '┐';
     const sep = '├' + widths.map(w => '─'.repeat(w + 2)).join('┼') + '┤';
@@ -86,8 +84,7 @@ function cleanNullStatics(cfg) {
         if (!ent || !Array.isArray(ent.schema)) continue;
         for (const col of ent.schema) {
             if (!col) continue;
-            if (Object.prototype.hasOwnProperty.call(col, 'staticValue') &&
-                (col.staticValue === null || col.staticValue === undefined)) {
+            if (Object.prototype.hasOwnProperty.call(col, 'staticValue') && (col.staticValue === null || col.staticValue === undefined)) {
                 delete col.staticValue;
             }
         }
@@ -132,18 +129,10 @@ function saveConfigClean(cfg) {
         console.log('');
 
         if (!isNew) {
-            const mdChoice = await askWithDefault(
-                rl,
-                `Do you want to (M)odify or (D)elete the entity "${entityKey}"? (M/D) [M]: `,
-                'M'
-            );
+            const mdChoice = await askWithDefault(rl, `Do you want to (M)odify or (D)elete the entity "${entityKey}"? (M/D) [M]: `, 'M');
 
             if (/^d/i.test(mdChoice || '')) {
-                const confirm = await askInlinePrefilled(
-                    rl,
-                    `Type DELETE to confirm deletion of ${entityKey}: `,
-                    ''
-                );
+                const confirm = await askInlinePrefilled(rl, `Type DELETE to confirm deletion of ${entityKey}: `, '');
                 if (confirm.trim().toUpperCase() === 'DELETE') {
                     delete cfg.entities[entityKey];
                     saveConfigClean(cfg);
@@ -159,20 +148,14 @@ function saveConfigClean(cfg) {
         console.log(`\nModifying entity ${entityKey}...\n`);
 
 
-        const hadSchema =
-            Array.isArray(e.schema) &&
-            e.schema.some(col => col && typeof col === 'object' && Object.keys(col).length > 0);
+        const hadSchema = Array.isArray(e.schema) && e.schema.some(col => col && typeof col === 'object' && Object.keys(col).length > 0);
 
         if (!hadSchema) {
             console.log(`\nNo schema[] for entity ${entityKey}. SQL CREATE TABLE is required.`);
             await requireSql(rl, cfg, entityKey);
         } else {
 
-            const doMerge = await askYesNo(
-                rl,
-                `Upload a new SQL CREATE TABLE to update stored schema for ${entityKey}?`,
-                false
-            );
+            const doMerge = await askYesNo(rl, `Upload a new SQL CREATE TABLE to update stored schema for ${entityKey}?`, false);
             if (doMerge) {
                 await optionalSqlMerge(rl, cfg, entityKey);
             } else {
@@ -184,23 +167,14 @@ function saveConfigClean(cfg) {
 
         {
             const ent = cfg.entities[entityKey];
-            const hasHarish =
-                !!(ent?.routes?.host) ||
-                !!(ent?.routes?.create?.path) ||
-                !!(ent?.routes?.update?.path) ||
-                !!(ent?.payload?.create?.jsonPayloadWrapper) ||
-                !!(ent?.payload?.update?.jsonPayloadWrapper);
+            const hasHarish = !!(ent?.routes?.host) || !!(ent?.routes?.create?.path) || !!(ent?.routes?.update?.path) || !!(ent?.payload?.create?.jsonPayloadWrapper) || !!(ent?.payload?.update?.jsonPayloadWrapper);
 
             if (!hasHarish) {
                 console.log(`\nNo HAR-derived info for ${entityKey}. A HAR file is required to learn routes and payload shape.`);
                 await harFlow(rl, cfg, entityKey);
             } else {
                 console.log('');
-                const wantHar = await askYesNo(
-                    rl,
-                    `Supply a sample HAR with API calls that create and update ${entityKey}?`,
-                    false
-                );
+                const wantHar = await askYesNo(rl, `Supply a sample HAR with API calls that create and update ${entityKey}?`, false);
                 if (wantHar) {
                     await harFlow(rl, cfg, entityKey);
                 } else {
@@ -274,13 +248,10 @@ function upsertEntity(cfg, key) {
                 host: null,
                 create: {path: null, method: null, params: [], headers: []},
                 update: {path: null, method: null, params: [], headers: []}
-            },
-            payload: {
+            }, payload: {
                 create: {jsonPayloadWrapper: null, requiredKeys: []},
                 update: {jsonPayloadWrapper: null, requiredKeys: []}
-            },
-            schema: [],
-            sources: {sqlPath: '', harPath: ''}
+            }, schema: [], sources: {sqlPath: '', harPath: ''}
         };
     } else {
 
@@ -322,7 +293,7 @@ function upsertEntity(cfg, key) {
  * @returns {Promise<{ key: string, isNew: boolean }>}
  */
 async function pickEntityWithNewFlag(rl, cfg) {
-       while (true) {
+    while (true) {
         const items = listEntitiesCaseInsensitive(cfg);
         if (items.length) {
             console.log('Entities:');
@@ -333,9 +304,7 @@ async function pickEntityWithNewFlag(rl, cfg) {
 
         console.log('   Q. Quit\n');
 
-        const prompt = items.length
-            ? 'Existing or New Entity name/number (or Q to quit): '
-            : 'Enter new entity name (or Q to quit): ';
+        const prompt = items.length ? 'Existing or New Entity name/number (or Q to quit): ' : 'Enter new entity name (or Q to quit): ';
 
         const input = (await askWithDefault(rl, prompt, items[0] || '')).trim();
 
@@ -461,9 +430,7 @@ function parseSqlCreate(sql) {
             if (ch === '[') inBr = true; else if (ch === ']') inBr = false;
         }
         if (!inBr) {
-            if (!inDQ && !inBQ && ch === "'" && prev !== '\\') inSQ = !inSQ;
-            else if (!inSQ && !inBQ && ch === '"' && prev !== '\\') inDQ = !inDQ;
-            else if (!inSQ && !inDQ && ch === '`') inBQ = !inBQ;
+            if (!inDQ && !inBQ && ch === "'" && prev !== '\\') inSQ = !inSQ; else if (!inSQ && !inBQ && ch === '"' && prev !== '\\') inDQ = !inDQ; else if (!inSQ && !inDQ && ch === '`') inBQ = !inBQ;
         }
         if (!inSQ && !inDQ && !inBQ && !inBr) {
             if (ch === '(') depth++; else if (ch === ')') depth--;
@@ -483,9 +450,7 @@ function parseSqlCreate(sql) {
                 if (ch === '[') bQ = true; else if (ch === ']') bQ = false;
             }
             if (!bQ) {
-                if (!dQ && !btQ && ch === "'" && prev !== '\\') sQ = !sQ;
-                else if (!sQ && !btQ && ch === '"' && prev !== '\\') dQ = !dQ;
-                else if (!sQ && !dQ && ch === '`') btQ = !btQ;
+                if (!dQ && !btQ && ch === "'" && prev !== '\\') sQ = !sQ; else if (!sQ && !btQ && ch === '"' && prev !== '\\') dQ = !dQ; else if (!sQ && !dQ && ch === '`') btQ = !btQ;
             }
             if (!sQ && !dQ && !btQ && !bQ) {
                 if (ch === '(') d++; else if (ch === ')') d = Math.max(0, d - 1);
@@ -528,8 +493,7 @@ function parseSqlCreate(sql) {
             pkMatch[1].split(',').forEach(chunk => {
                 let col = chunk.trim().replace(/\bASC\b|\bDESC\b/ig, '').replace(/\s+/g, ' ').trim();
                 const bracketed = col.match(/\[([^\]]+)]/);
-                if (bracketed) col = bracketed[1];
-                else col = stripQuotes(col.split(/\s+/)[0]);
+                if (bracketed) col = bracketed[1]; else col = stripQuotes(col.split(/\s+/)[0]);
                 if (col) tablePk.push(col);
             });
             continue;
@@ -546,8 +510,7 @@ function parseSqlCreate(sql) {
 
         let length = null, precision = null, scale = null;
         if (size) {
-            if (/^\d+$/i.test(size)) length = parseInt(size, 10);
-            else if (/^\d+\s*,\s*\d+$/i.test(size)) {
+            if (/^\d+$/i.test(size)) length = parseInt(size, 10); else if (/^\d+\s*,\s*\d+$/i.test(size)) {
                 const [p, s] = size.split(',').map(x => parseInt(x, 10));
                 precision = p;
                 scale = s;
@@ -558,10 +521,7 @@ function parseSqlCreate(sql) {
         cols.push({name, type, length, precision, scale, inlinePk});
     }
 
-    const primaryKeys = Array.from(new Set([
-        ...cols.filter(c => c.inlinePk).map(c => c.name),
-        ...tablePk
-    ]));
+    const primaryKeys = Array.from(new Set([...cols.filter(c => c.inlinePk).map(c => c.name), ...tablePk]));
     return {columns: cols, primaryKeys};
 }
 
@@ -591,11 +551,15 @@ function mergeSchema(cfg, entityKey, parsed, {mode}) {
         if (!existed) {
 
             merged.push({
-                name: c.name, type: c.type,
+                name: c.name,
+                type: c.type,
                 length: c.length ?? (c.precision != null ? `${c.precision}${c.scale != null ? ',' + c.scale : ''}` : null),
-                precision: c.precision ?? null, scale: c.scale ?? null,
-                isPk: pkSet.has(key), immutable: pkSet.has(key),
-                createApiField: "", updateApiField: "",
+                precision: c.precision ?? null,
+                scale: c.scale ?? null,
+                isPk: pkSet.has(key),
+                immutable: pkSet.has(key),
+                createApiField: "",
+                updateApiField: "",
                 serverGeneratedOnCreate: false
             });
             added.push(c.name);
@@ -655,19 +619,11 @@ async function summaryPromptsOnce(rl, e, entityKey) {
 
     routes.host = await askInlinePrefilled(rl, `(${entityKey}) Host:`, routes.host || (e.routes.host || ''));
 
-    routes.create.method = (await askInlinePrefilled(
-        rl, `(${entityKey}) CREATE method:`, (routes.create.method || 'POST').toUpperCase()
-    )).toUpperCase();
-    routes.create.path = await askInlinePrefilled(
-        rl, `(${entityKey}) CREATE path:`, routes.create.path || '/api/<entity>'
-    );
+    routes.create.method = (await askInlinePrefilled(rl, `(${entityKey}) CREATE method:`, (routes.create.method || 'POST').toUpperCase())).toUpperCase();
+    routes.create.path = await askInlinePrefilled(rl, `(${entityKey}) CREATE path:`, routes.create.path || '/api/<entity>');
 
-    routes.update.method = (await askInlinePrefilled(
-        rl, `(${entityKey}) UPDATE method:`, (routes.update.method || 'POST').toUpperCase()
-    )).toUpperCase();
-    routes.update.path = await askInlinePrefilled(
-        rl, `(${entityKey}) UPDATE path:`, routes.update.path || `/api/${entityKey.toLowerCase()}/id/:id`
-    );
+    routes.update.method = (await askInlinePrefilled(rl, `(${entityKey}) UPDATE method:`, (routes.update.method || 'POST').toUpperCase())).toUpperCase();
+    routes.update.path = await askInlinePrefilled(rl, `(${entityKey}) UPDATE path:`, routes.update.path || `/api/${entityKey.toLowerCase()}/id/:id`);
 
 
     const currentIdParam = (routes.update.params && routes.update.params[0]) || {name: 'id', column: ''};
@@ -678,14 +634,10 @@ async function summaryPromptsOnce(rl, e, entityKey) {
     const idCol = await askInlinePrefilled(rl, `(${entityKey}) UPDATE param "id" column:`, defaultIdColumn || '');
     routes.update.params = [{name: 'id', column: idCol}];
 
-    const cwrap = await askInlinePrefilled(
-        rl, `(${entityKey}) CREATE JSON payload wrapper (blank = none):`, e.payload.create.jsonPayloadWrapper || ''
-    );
+    const cwrap = await askInlinePrefilled(rl, `(${entityKey}) CREATE JSON payload wrapper (blank = none):`, e.payload.create.jsonPayloadWrapper || '');
     e.payload.create.jsonPayloadWrapper = cwrap || null;
 
-    const uwrap = await askInlinePrefilled(
-        rl, `(${entityKey}) UPDATE JSON payload wrapper (blank = none):`, e.payload.update.jsonPayloadWrapper || ''
-    );
+    const uwrap = await askInlinePrefilled(rl, `(${entityKey}) UPDATE JSON payload wrapper (blank = none):`, e.payload.update.jsonPayloadWrapper || '');
     e.payload.update.jsonPayloadWrapper = uwrap || null;
 
     console.log('');
@@ -932,9 +884,7 @@ function harvestEntries(har) {
             path = url;
         }
         return {
-            startedDateTime: e.startedDateTime,
-            url, method, path,
-            req, res
+            startedDateTime: e.startedDateTime, url, method, path, req, res
         };
     });
     return entries.filter(e => e.method && e.path);
@@ -1044,8 +994,7 @@ function sanitizeHeaders(arr) {
 
 
         let value = String(h.value ?? '').trim().replace(/\s+/g, ' ');
-        if ((value.startsWith('"') && value.endsWith('"')) ||
-            (value.startsWith("'") && value.endsWith("'"))) {
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
             value = value.slice(1, -1);
         }
 
@@ -1180,21 +1129,7 @@ function findWrapper(obj, options) {
     const relaxedToKey = new Map(keys.map((k) => [relax(k), k]));
 
     // 2) Common envelope/container names (alias-free)
-    const containers = [
-        "data",
-        "payload",
-        "entity",
-        "request",
-        "item",
-        "record",
-        "attributes",
-        "wrapper",
-        "envelope",
-        "result",
-        "results",
-        "response",
-        "body",
-    ];
+    const containers = ["data", "payload", "entity", "request", "item", "record", "attributes", "wrapper", "envelope", "result", "results", "response", "body",];
 
     for (const hint of containers) {
         if (mapNormToKey.has(hint) && isObj(obj[mapNormToKey.get(hint)])) {
@@ -1296,16 +1231,7 @@ function inferServerGeneratedFields(entity, analysis) {
      * @returns {boolean} True if the name looks server-generated.
      */
     const nameLooksStamped = (lowerName) => {
-        return (
-            lowerName.startsWith('created') ||
-            lowerName.startsWith('modified') ||
-            lowerName.startsWith('updated') ||
-            lowerName.includes('timestamp') ||
-            lowerName === 'rowversion' ||
-            lowerName === 'ts' ||
-            lowerName === 'ctime' ||
-            lowerName === 'mtime'
-        );
+        return (lowerName.startsWith('created') || lowerName.startsWith('modified') || lowerName.startsWith('updated') || lowerName.includes('timestamp') || lowerName === 'rowversion' || lowerName === 'ts' || lowerName === 'ctime' || lowerName === 'mtime');
     };
 
     for (const col of (entity.schema || [])) {
@@ -1324,10 +1250,7 @@ function inferServerGeneratedFields(entity, analysis) {
         const hasNonEmptyResCreate = inResCreate && isNonEmptyEvidence(resCreateVal);
         const hasNonEmptyResUpdate = inResUpdate && isNonEmptyEvidence(resUpdateVal);
 
-        const looksServerGenerated =
-            (!inReqCreate && (hasNonEmptyResCreate || nameLooksStamped(nameLower))) ||
-            (!inReqUpdate && (hasNonEmptyResUpdate || nameLooksStamped(nameLower))) ||
-            nameLooksStamped(nameLower);
+        const looksServerGenerated = (!inReqCreate && (hasNonEmptyResCreate || nameLooksStamped(nameLower))) || (!inReqUpdate && (hasNonEmptyResUpdate || nameLooksStamped(nameLower))) || nameLooksStamped(nameLower);
 
         if (looksServerGenerated) {
             col.serverGeneratedOnCreate = true;
@@ -1378,9 +1301,7 @@ function fillMappingsFromKeysDeep(schema, analysis, side) {
 function exactLeafMatch(colNameLower, leafSet) {
     if (!leafSet || !leafSet.size) return '';
 
-    for (const k of colNameLower)
-        if (leafSet.has(k))
-            return k;
+    for (const k of colNameLower) if (leafSet.has(k)) return k;
     for (const k of leafSet) {
         if (k === colNameLower) return k;
     }
@@ -1643,30 +1564,28 @@ async function tableEditor(rl, cfg, entityKey) {
     function _regexExamplesForType(type) {
         switch (type) {
             case 'email':
-                return [
-                    {label: '^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$', sample: 'first.last+tag@company.co'},
-                    {label: '^address@[a-z]{4,10}\\.(com|net|org)$', sample: 'address@acme.com'},
-                    {label: '^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$', sample: 'any@loose.domain'},
-                ];
+                return [{
+                    label: '^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$',
+                    sample: 'first.last+tag@company.co'
+                }, {
+                    label: '^address@[a-z]{4,10}\\.(com|net|org)$',
+                    sample: 'address@acme.com'
+                }, {label: '^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$', sample: 'any@loose.domain'},];
             case 'phone':
-                return [
-                    {label: '^\\(\\d{3}\\) \\d{3}-\\d{4}$', sample: '(214) 555-7890'},
-                    {label: '^\\d{3}-\\d{3}-\\d{4}$', sample: '214-555-7890'},
-                    {label: '^\\+1 \\d{3} \\d{3} \\d{4}$', sample: '+1 214 555 7890'},
-                    {label: '^\\d{10}$', sample: '2145557890'},
-                ];
+                return [{
+                    label: '^\\(\\d{3}\\) \\d{3}-\\d{4}$',
+                    sample: '(214) 555-7890'
+                }, {label: '^\\d{3}-\\d{3}-\\d{4}$', sample: '214-555-7890'}, {
+                    label: '^\\+1 \\d{3} \\d{3} \\d{4}$',
+                    sample: '+1 214 555 7890'
+                }, {label: '^\\d{10}$', sample: '2145557890'},];
             case 'zip':
-                return [
-                    {label: '^\\d{5}$', sample: '75001'},
-                    {label: '^\\d{5}(-\\d{4})?$', sample: '75001-1234'},
-                ];
+                return [{label: '^\\d{5}$', sample: '75001'}, {label: '^\\d{5}(-\\d{4})?$', sample: '75001-1234'},];
             case 'state':
-                return [
-                    {
-                        label: '^(?:A[LKSZ]|C[AOT]|D[CE]|FL|GA|HI|I[ADLN]|K[SY]|LA|M[ADEHINOPST]|N[CDEHJMVY]|O[HKR]|P[AR]|RI|S[CD]|T[NX]|UT|V[AIT]|W[AIVY])$',
-                        sample: 'TX, CA, NY only'
-                    },
-                ];
+                return [{
+                    label: '^(?:A[LKSZ]|C[AOT]|D[CE]|FL|GA|HI|I[ADLN]|K[SY]|LA|M[ADEHINOPST]|N[CDEHJMVY]|O[HKR]|P[AR]|RI|S[CD]|T[NX]|UT|V[AIT]|W[AIVY])$',
+                    sample: 'TX, CA, NY only'
+                },];
             default:
                 return [];
         }
@@ -1910,8 +1829,7 @@ Regex help examples:
 
         while (true) {
             const caf = await askInlinePrefilled(rl, `(${entityKey}) createApiField (blank = none): `, col.createApiField || '');
-            const v =
-                String(caf || '').trim();
+            const v = String(caf || '').trim();
             if (v && _isDuplicate(entity.schema, 'createApiField', v, idxSelf)) {
                 console.log('⚠️  Another row already uses that createApiField. Please enter a unique value.');
                 continue;
@@ -1994,24 +1912,7 @@ async function runBackfill(entity) {
 function printPreviewTable(cfg, entityKey) {
     const e = cfg.entities[entityKey];
     const headers = ['#', 'Column', 'Type', 'Len', 'PK', 'createApiField', 'updateApiField', 'Req', 'Immutable', 'SrvGenOnCreate', 'Static', 'GenRegex'];
-    const rows = (e.schema || []).map((c, idx) => [
-        String(idx + 1),
-        c.name || '',
-        c.type || '',
-        c.length == null ? '' : String(c.length),
-        c.isPk ? 'PK' : '',
-        c.createApiField || '',
-        c.updateApiField || '',
-        c.required ? 'Y' : '',
-        c.immutable ? 'Y' : '',
-        c.serverGeneratedOnCreate ? 'Y' : '',
-        c.staticValue == null ? '' : String(c.staticValue),
-        c.generatePatternRegex
-            ? (String(c.generatePatternRegex).length > 22
-                ? String(c.generatePatternRegex).slice(0, 22) + '...'
-                : String(c.generatePatternRegex))
-            : ''
-    ]);
+    const rows = (e.schema || []).map((c, idx) => [String(idx + 1), c.name || '', c.type || '', c.length == null ? '' : String(c.length), c.isPk ? 'PK' : '', c.createApiField || '', c.updateApiField || '', c.required ? 'Y' : '', c.immutable ? 'Y' : '', c.serverGeneratedOnCreate ? 'Y' : '', c.staticValue == null ? '' : String(c.staticValue), c.generatePatternRegex ? (String(c.generatePatternRegex).length > 22 ? String(c.generatePatternRegex).slice(0, 22) + '...' : String(c.generatePatternRegex)) : '']);
     printTable(headers, rows);
 }
 

@@ -1,14 +1,23 @@
 #!/usr/bin/env node
 /**
  * @file build-har-generator.js
- * @summary HAR generator (G mode) with per-entity create/update controls.
- * @description Interactively chooses counts, optional CSV for updates, builds payloads from schema/static/regex,
- * validates required keys, and writes a single HAR after confirmation.
+ * @summary HAR generator with per‑entity create/update controls (G mode).
+ * @description Collects counts, optional CSV for updates, builds bodies from schema/statics/regex, validates required keys, and writes a single HAR.
  */
 "use strict";
 
 const fs = require("fs");
-const { joinUrl, shuffleInPlace, chooseByPercent, _sqlIntCapForType, clampIntForSqlType, coerceAndNormalizeForChangelog, sqlLiteral, simpleEntityName} = require('./build-har-common');
+const {
+    joinUrl,
+    shuffleInPlace,
+    chooseByPercent,
+    _sqlIntCapForType,
+    clampIntForSqlType,
+    coerceAndNormalizeForChangelog,
+    sqlLiteral,
+    simpleEntityName,
+    clampDecimal19_6
+} = require('./build-har-common');
 const path = require("path");
 
 const {
@@ -22,13 +31,23 @@ const {
     uniqueDatedFilename,
 } = require("./build-har-common");
 
-/** Print message and terminate with non-zero exit code. */
+/**
+ * die — print an error message and terminate the process.
+ *
+ * @param {string} msg - Message to print to stderr before exit(1).
+ * @returns {never}
+ */
 function die(msg) {
     console.error(msg);
     process.exit(1);
 }
 
-/** Load and validate config structure; ensure `entities` map exists. */
+/**
+ * ensureConfig — load and validate the JSONC config from disk.
+ * Verifies the top-level shape and that `entities` exists; exits on failure.
+ *
+ * @returns {Object} Loaded configuration object.
+ */
 function ensureConfig() {
     const cfg = loadJsonc(CONFIG_PATH, null);
     if (!cfg || typeof cfg !== "object") die(`Could not load a valid config at: ${path.resolve(CONFIG_PATH)}`);
@@ -36,7 +55,14 @@ function ensureConfig() {
     return cfg;
 }
 
-/** Inline numeric prompt; blank yields the minimum value (default 0). */
+/**
+ * askNumberInlineNoDefault — read an inline integer from the user.
+ * Blank input yields the minimum (default 0); invalid input clamps to min.
+ *
+ * @param {string} prompt - Prompt label (without the trailing colon).
+ * @param {number} [min=0] - Minimum accepted value.
+ * @returns {Promise<number>} Parsed integer.
+ */
 async function askNumberInlineNoDefault(prompt, min = 0) {
     const s = await askInlinePrefilled(null, `${prompt}:`, "");
     const trimmed = String(s ?? "").trim();
@@ -46,16 +72,36 @@ async function askNumberInlineNoDefault(prompt, min = 0) {
     return Math.floor(n);
 }
 
-/** Choose uppercase singular/plural label for display. */
+/**
+ * pluralUpper — return an uppercase singular/plural display label.
+ *
+ * @param {number} n - Quantity to pluralize.
+ * @param {string} singularUpper - Singular label in uppercase.
+ * @param {string} pluralUpperWord - Plural label in uppercase.
+ * @returns {string} Chosen label.
+ */
 function pluralUpper(n, singularUpper, pluralUpperWord) {
     return n === 1 ? singularUpper : pluralUpperWord;
 }
-/** Choose 'entry' vs 'entries' for counts. */
+
+/**
+ * entryWord — convenience pluralizer for "entry"/"entries".
+ *
+ * @param {number} n - Count.
+ * @returns {string} "entry" or "entries".
+ */
 function entryWord(n) {
     return n === 1 ? "entry" : "entries";
 }
 
-/** Validate routing essentials and return a compact descriptor for HAR building. */
+/**
+ * requireEntityBits — validate entity routing fields and return a compact descriptor.
+ * Ensures create/update methods/paths and the update id parameter mapping exist.
+ *
+ * @param {string} entityKey - Canonical entity key.
+ * @param {Object} entity - Entity configuration from the config file.
+ * @returns {Object} { host, createMethod, createPath, updateMethod, updatePath, idCol }.
+ */
 function requireEntityBits(entityKey, entity) {
     if (!entity || typeof entity !== "object") die(`Missing entity config for "${entityKey}".`);
 
@@ -65,8 +111,7 @@ function requireEntityBits(entityKey, entity) {
     if (!update || !update.method || !update.path) die(`Missing routes.update (method/path) for "${entityKey}".`);
 
     const idParam0 = update?.params?.[0];
-    if (!idParam0 || !idParam0.column)
-        die(`Missing update mapping for "${entityKey}". Expected routes.update.params[0].column.`);
+    if (!idParam0 || !idParam0.column) die(`Missing update mapping for "${entityKey}". Expected routes.update.params[0].column.`);
 
     return {
         host: entity?.routes?.host || "",
@@ -79,37 +124,54 @@ function requireEntityBits(entityKey, entity) {
 }
 
 let RandExp = null;
-try { RandExp = require("randexp"); } catch {  }
+try {
+    RandExp = require("randexp");
+} catch {
+}
 
-/** Generate a value matching a regex using randexp if available; limited fallback otherwise. */
+/**
+ * genFromRegexPattern — generate a value from a regex using randexp when available.
+ * Falls back to a simple character-class expander for patterns like `^[A-Z]{8}$`.
+ *
+ * @param {string} pattern - Regex source (without flags).
+ * @param {number} [maxLen=256] - Safety cap for generation length.
+ * @returns {{ok:boolean, value:string}} Generation result.
+ */
 function genFromRegexPattern(pattern, maxLen = 256) {
     try {
         if (RandExp) {
             const re = new RandExp(new RegExp(pattern));
             re.max = Math.min(re.max, Math.max(1, maxLen));
-            return { ok: true, value: re.gen() };
+            return {ok: true, value: re.gen()};
         }
         const m = String(pattern).match(/^\^?(\[[^\]]+])\{(\d+)}\$?$/);
         if (m) {
-            const cls = m[1]; const n = Math.min(parseInt(m[2], 10) || 1, maxLen);
+            const cls = m[1];
+            const n = Math.min(parseInt(m[2], 10) || 1, maxLen);
             const pool = cls
                 .replace(/^\[/, "").replace(/]$/, "")
                 .replace(/A-Z/g, "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
                 .replace(/a-z/g, "abcdefghijklmnopqrstuvwxyz")
                 .replace(/0-9/g, "0123456789");
-            if (!pool.length) return { ok: false, value: "" };
+            if (!pool.length) return {ok: false, value: ""};
             let out = "";
             for (let i = 0; i < n; i++) out += pool[Math.floor(Math.random() * pool.length)];
-            return { ok: true, value: out };
+            return {ok: true, value: out};
         }
-        return { ok: false, value: "" };
+        return {ok: false, value: ""};
     } catch {
-        return { ok: false, value: "" };
+        return {ok: false, value: ""};
     }
 }
 
-/** Apply side-specific JSON wrapper when defined; otherwise return body as-is. */
-function shapePayload({ side, entity, body }) {
+/**
+ * shapePayload — apply a side-specific JSON wrapper key if configured.
+ * Returns the wrapped object when a wrapper exists; otherwise returns the original body.
+ *
+ * @param {{side:"create"|"update", entity:Object, body:Object}} args - Operation context.
+ * @returns {Object} Wrapped or raw body.
+ */
+function shapePayload({side, entity, body}) {
     const wrapKey = entity?.payload?.[side]?.jsonPayloadWrapper;
     if (typeof wrapKey === "string" && wrapKey.trim().length > 0) {
         const wrapped = {};
@@ -119,13 +181,67 @@ function shapePayload({ side, entity, body }) {
     return body;
 }
 
-function _randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-function _pick(arr) { return arr[_randInt(0, arr.length - 1)]; }
-function _randLetters(n) { const A = 'abcdefghijklmnopqrstuvwxyz'; let s=''; for (let i=0;i<n;i++) s += A[_randInt(0,25)]; return s; }
-function _cap(s) { s = String(s||''); return s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s; }
+/**
+ * _randInt — random integer in [min, max].
+ *
+ * @param {number} min - Inclusive lower bound.
+ * @param {number} max - Inclusive upper bound.
+ * @returns {number} Pseudorandom integer.
+ */
+function _randInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}
 
-/** Determine maximum content length from column metadata. */
-function _maxLenFromCol(col, fallback=256) {
+/**
+ * _pick — choose a random element from a non-empty array.
+ *
+ * @param {Array<any>} arr - Candidate items.
+ * @returns {any} Selected element.
+ */
+function _pick(arr) {
+    return arr[_randInt(0, arr.length - 1)];
+}
+
+
+/**
+ * _randLetters — produce a random lowercase alpha string of length n.
+ *
+ * @param {number} n - Desired length.
+ * @returns {string} Random string.
+ */
+function _randLetters(n) {
+    const A = 'abcdefghijklmnopqrstuvwxyz';
+    let s = '';
+    for (let i = 0; i < n; i++) s += A[_randInt(0, 25)];
+    return s;
+}
+
+/**
+ * _cap — utility helper; see implementation for details.
+ *
+ * @param {any} s - input parameter.
+ * @returns {any} Result.
+ */
+
+/**
+ * _cap — capitalize a string (first char upper, rest lower).
+ *
+ * @param {string} s - Input value.
+ * @returns {string} Capitalized string.
+ */
+function _cap(s) {
+    s = String(s || '');
+    return s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s;
+}
+
+/**
+ * _maxLenFromCol — determine max content length from column metadata.
+ *
+ * @param {Object} col - Schema column with maxLength/length fields.
+ * @param {number} [fallback=256] - Default when not specified.
+ * @returns {number} Effective maximum length.
+ */
+function _maxLenFromCol(col, fallback = 256) {
     const L = Number(col?.maxLength) || Number(col?.length);
     if (Number.isFinite(L) && L > 0) return L;
     return fallback;
@@ -133,65 +249,47 @@ function _maxLenFromCol(col, fallback=256) {
 
 /** --- HARD CAPS for the changelog table --- */
 const MAX_DEC19_6_INT_DIGITS = 13; // 19 - 6
-const MAX_DEC19_6_ABS = 9999999999999.999999; // 13 nines + . + 6 nines
-function clampDecimal19_6(n) {
-    if (n == null || n === "") return n;
-    let x = Number(n);
-    if (!Number.isFinite(x)) return 0;
-    // round to 6 fractional digits
-    x = Math.round(x * 1e6) / 1e6;
-    if (x >  MAX_DEC19_6_ABS) return MAX_DEC19_6_ABS;
-    if (x < -MAX_DEC19_6_ABS) return -MAX_DEC19_6_ABS;
-    // also ensure integer digits <= 13 (covers 10^13 - 1)
-    const abs = Math.abs(x);
-    if (abs >= 1e13) {
-        const sign = x < 0 ? -1 : 1;
-        return sign * (1e13 - 1e-6); // 9999999999999.999999
-    }
-    return x;
-}
 
-/** SQL integer caps to avoid overflow in generated values. */
-
-
-
-
-/** Try to coerce and normalize any incoming value for the changelog sinks. */
-
-
-/** Name-based heuristics for common fields (email, phone, city, etc.). */
+/**
+ * _fallbackByName — generate a realistic value based on a column's name.
+ * Covers common fields (first/last/email/phone/zip/state/city/country/lat/lon).
+ *
+ * @param {Object} col - Schema column (expects `.name`).
+ * @param {number} maxLen - Maximum length for string results.
+ * @returns {string|number|null} Candidate value or null if not recognized.
+ */
 function _fallbackByName(col, maxLen) {
     const nm = String(col?.name || '').toLowerCase();
 
     if (/(^|_)first(name)?$/.test(nm)) {
-        const firsts = ["Ava","Mia","Noah","Liam","Emma","Olivia","Ethan","Mason","Ella","Grace","Zoe","Logan","Leo","Nora","Lily","Julia","Sofia","Aria","Mila","James"];
+        const firsts = ["Ava", "Mia", "Noah", "Liam", "Emma", "Olivia", "Ethan", "Mason", "Ella", "Grace", "Zoe", "Logan", "Leo", "Nora", "Lily", "Julia", "Sofia", "Aria", "Mila", "James"];
         return _pick(firsts).slice(0, maxLen);
     }
     if (/(^|_)last(name)?$/.test(nm) || /surname/.test(nm)) {
-        const lasts = ["Smith","Johnson","Williams","Brown","Jones","Garcia","Miller","Davis","Rodriguez","Martinez","Hernandez","Lopez","Gonzalez","Wilson","Anderson","Thomas","Taylor","Moore","Jackson","Martin"];
+        const lasts = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin"];
         return _pick(lasts).slice(0, maxLen);
     }
     if (/email/.test(nm)) {
-        const user = (_randLetters(1) + _randLetters(_randInt(5,10))).slice(0, Math.max(3, maxLen - 12));
+        const user = (_randLetters(1) + _randLetters(_randInt(5, 10))).slice(0, Math.max(3, maxLen - 12));
         return `${user}@example.com`.slice(0, maxLen);
     }
     if (/phone|tel/.test(nm)) {
-        const s = `${_randInt(200,999)}-${_randInt(200,999)}-${String(_randInt(0,9999)).padStart(4,'0')}`;
+        const s = `${_randInt(200, 999)}-${_randInt(200, 999)}-${String(_randInt(0, 9999)).padStart(4, '0')}`;
         return s.slice(0, maxLen);
     }
     if (/zip|postal/.test(nm)) {
         return String(_randInt(10000, 98999)).slice(0, maxLen);
     }
     if (/state/.test(nm)) {
-        const states = ["TX","CA","NY","FL","WA","CO","IL","GA","NC","AZ","OH","MI","PA","TN","VA"];
+        const states = ["TX", "CA", "NY", "FL", "WA", "CO", "IL", "GA", "NC", "AZ", "OH", "MI", "PA", "TN", "VA"];
         return _pick(states).slice(0, maxLen);
     }
     if (/city/.test(nm)) {
-        const cities = ["Austin","Dallas","Seattle","Denver","Phoenix","Atlanta","Chicago","Nashville","Tampa","Charlotte","Columbus","Orlando","Plano","Boulder","Tempe"];
+        const cities = ["Austin", "Dallas", "Seattle", "Denver", "Phoenix", "Atlanta", "Chicago", "Nashville", "Tampa", "Charlotte", "Columbus", "Orlando", "Plano", "Boulder", "Tempe"];
         return _pick(cities).slice(0, maxLen);
     }
     if (/country/.test(nm)) {
-        const countries = ["US","Canada","UK","Germany","France","Mexico","Brazil","Japan","Australia","India"];
+        const countries = ["US", "Canada", "UK", "Germany", "France", "Mexico", "Brazil", "Japan", "Australia", "India"];
         return _pick(countries).slice(0, maxLen);
     }
     if (/lat(itude)?$/.test(nm)) {
@@ -204,15 +302,30 @@ function _fallbackByName(col, maxLen) {
     return null;
 }
 
-/** Helper: choose a random length between ceil(20% * maxLen) and maxLen (inclusive), with a hard cap (default 25). */
+/**
+ * _randLenPercentOfMax — choose a random length as a % of maxLen.
+ * Picks a value between ceil(minFrac*maxLen) and maxLen, capped by hardCap.
+ *
+ * @param {number} maxLen - Column max length.
+ * @param {number} [minFrac=0.2] - Minimum fraction (0..1).
+ * @param {number} [hardCap=25] - Hard upper bound.
+ * @returns {number} Selected length.
+ */
 function _randLenPercentOfMax(maxLen, minFrac = 0.2, hardCap = 25) {
     const max = Math.max(1, Number(maxLen) || 1);
-    const hi  = Math.min(max, Math.max(1, Number(hardCap) || 1));
-    const lo  = Math.max(1, Math.ceil(hi * Math.max(0, Math.min(1, minFrac))));
+    const hi = Math.min(max, Math.max(1, Number(hardCap) || 1));
+    const lo = Math.max(1, Math.ceil(hi * Math.max(0, Math.min(1, minFrac))));
     return _randInt(lo, hi);
 }
 
-/** Type-driven fallbacks for numeric/text/date/boolean columns. */
+/**
+ * _fallbackByType — generate a value based on SQL type metadata.
+ * Handles text/integer/decimal/money/float/real/date/time/bit, respecting caps.
+ *
+ * @param {Object} col - Schema column (type/precision/scale/etc.).
+ * @param {number} maxLen - Maximum length for string results.
+ * @returns {string|number|boolean} Generated value.
+ */
 function _fallbackByType(col, maxLen) {
     const t = String(col?.type || '').toUpperCase();
 
@@ -229,7 +342,7 @@ function _fallbackByType(col, maxLen) {
         const cap = _sqlIntCapForType(t);
         const capDigits = Math.max(1, Math.floor(Math.log10(cap)) + 1);
         const usedDigits = _randInt(Math.max(1, Math.ceil(capDigits * 0.2)), capDigits); // 20%..100% of capacity
-        const low  = Math.pow(10, usedDigits - 1);
+        const low = Math.pow(10, usedDigits - 1);
         const high = Math.min(cap, Math.pow(10, usedDigits) - 1);
         let n = _randInt(low, Math.max(low, high));
         if (Math.random() < 0.5) n = -n; // randomize sign except TINYINT (handled above) / BIT handled elsewhere
@@ -238,21 +351,21 @@ function _fallbackByType(col, maxLen) {
 
     // DECIMAL/NUMERIC/MONEY/SMALLMONEY/REAL/FLOAT
     if (/DECIMAL|NUMERIC|MONEY|SMALLMONEY|FLOAT|REAL/.test(t)) {
-        const rawPrec  = Number(col?.precision);
+        const rawPrec = Number(col?.precision);
         const rawScale = Number(col?.scale);
         const impliedScale = t.includes('MONEY') ? 4 : 2;
 
         // Clamp at changelog max: p<=19, s<=6
-        const prec  = Math.max(1, Math.min(19, Number.isFinite(rawPrec) ? rawPrec : 8));
-        const scale = Math.max(0, Math.min(6,  Number.isFinite(rawScale) ? rawScale : impliedScale));
+        const prec = Math.max(1, Math.min(19, Number.isFinite(rawPrec) ? rawPrec : 8));
+        const scale = Math.max(0, Math.min(6, Number.isFinite(rawScale) ? rawScale : impliedScale));
 
         const intDigitsAllowed = Math.max(1, Math.min(MAX_DEC19_6_INT_DIGITS, prec - scale));
 
         // Choose digits used in 20%..100% ranges
-        const usedInt  = _randInt(Math.max(1, Math.ceil(intDigitsAllowed * 0.2)), intDigitsAllowed);
+        const usedInt = _randInt(Math.max(1, Math.ceil(intDigitsAllowed * 0.2)), intDigitsAllowed);
         const usedFrac = _randInt(Math.max(0, Math.ceil(scale * 0.2)), scale);
 
-        const intLow  = Math.pow(10, Math.max(1, usedInt) - 1);
+        const intLow = Math.pow(10, Math.max(1, usedInt) - 1);
         const intHigh = Math.pow(10, Math.max(1, usedInt)) - 1;
         const intPart = String(_randInt(intLow, intHigh));
 
@@ -262,7 +375,7 @@ function _fallbackByType(col, maxLen) {
             return clampDecimal19_6(v);
         }
 
-        const fracMax  = Math.pow(10, Math.min(9, usedFrac)) - 1; // keep sampling reasonable
+        const fracMax = Math.pow(10, Math.min(9, usedFrac)) - 1; // keep sampling reasonable
         const fracPart = String(_randInt(0, Math.max(0, fracMax))).padStart(usedFrac, '0');
 
         let v = Number(`${intPart}.${fracPart}`);
@@ -274,23 +387,25 @@ function _fallbackByType(col, maxLen) {
     if (/DATE|TIME/.test(t)) {
         const now = new Date();
         const daysBack = _randInt(0, 365);
-        const d = new Date(now.getTime() - daysBack*24*3600*1000);
-        if (/DATE/.test(t) && !/TIME/.test(t)) return d.toISOString().slice(0,10);
-        if (/TIME/.test(t) && !/DATE/.test(t)) return d.toISOString().slice(11,19);
-        return d.toISOString().slice(0,19);
+        const d = new Date(now.getTime() - daysBack * 24 * 3600 * 1000);
+        if (/DATE/.test(t) && !/TIME/.test(t)) return d.toISOString().slice(0, 10);
+        if (/TIME/.test(t) && !/DATE/.test(t)) return d.toISOString().slice(11, 19);
+        return d.toISOString().slice(0, 19);
     }
 
-    if (/\bBIT\b/.test(t)) return _randInt(0,1);
+    if (/\bBIT\b/.test(t)) return _randInt(0, 1);
 
     // Generic fallback string with 20%..100% length, hard-capped at 25
     return _cap(_randLetters(_randLenPercentOfMax(maxLen, 0.2, 25)));
 }
 
-
-/** Convert keys to a display label. */
-
-
-/** Combine name/type heuristics, clipped to column length. */
+/**
+ * genFallbackForColumn — combine name/type heuristics clipped to length.
+ * Prefers name-based samples when recognized; otherwise uses type-based generation.
+ *
+ * @param {Object} col - Schema column definition.
+ * @returns {any} Generated value suitable for the column.
+ */
 function genFallbackForColumn(col) {
     const maxLen = _maxLenFromCol(col, 256);
     const byName = _fallbackByName(col, maxLen);
@@ -301,9 +416,6 @@ function genFallbackForColumn(col) {
     return (typeof byType === 'string') ? byType.slice(0, maxLen) : byType;
 }
 
-/** NEW: choose a random subset by percentage (rounded) */
-
-
 /**
  * Build request body for create/update honoring CSV overrides, static values, and regex generation,
  * then apply fill% selection over the "change pool".
@@ -313,7 +425,7 @@ function genFallbackForColumn(col) {
  * - UPDATE: immutable are never in the pool (unless they have staticValue, which is included earlier); required are eligible for the pool.
  * - We never send blanks; we omit non-selected fields on UPDATE.
  */
-function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent, entity }) {
+function buildBodyForSide({side, schema, csvRow, csvHeadersLower, fillPercent}) {
     const body = {};
     const pool = [];
 
@@ -331,8 +443,7 @@ function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent, 
         if (side === "update" && csvRow && csvHeadersLower && csvHeadersLower.includes(String(field).toLowerCase())) {
             // try to coerce/normalize when numeric column
             const raw = csvRow[field];
-            const normalized = coerceAndNormalizeForChangelog(col, raw);
-            body[field] = normalized;
+            body[field] = coerceAndNormalizeForChangelog(col, raw);
             continue;
         }
 
@@ -371,7 +482,7 @@ function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent, 
         }
 
         // Otherwise, eligible for pool
-        pool.push({ field, value: valueChosen, type: t });
+        pool.push({field, value: valueChosen, type: t});
     }
 
     // Select by percent
@@ -381,31 +492,45 @@ function buildBodyForSide({ side, schema, csvRow, csvHeadersLower, fillPercent, 
     return body;
 }
 
-
-function buildHarEntry({ method, url, body }) {
+/**
+ * buildHarEntry — construct a minimal HAR entry from method/url/body.
+ *
+ * @param {{method:string, url:string, body:Object}} args - Request components.
+ * @returns {Object} HAR entry object (log.entries[] element).
+ */
+function buildHarEntry({method, url, body}) {
     return {
-        startedDateTime: new Date().toISOString(),
-        time: 0,
-        request: {
-            method, url, httpVersion: "HTTP/1.1",
+        startedDateTime: new Date().toISOString(), time: 0, request: {
+            method,
+            url,
+            httpVersion: "HTTP/1.1",
             cookies: [],
-            headers: [{ name: "content-type", value: "application/json" }],
+            headers: [{name: "content-type", value: "application/json"}],
             queryString: [],
-            postData: { mimeType: "application/json", text: JSON.stringify(body) },
-        },
-        response: {
-            status: 0, statusText: "", httpVersion: "HTTP/1.1",
-            cookies: [], headers: [],
-            content: { size: 0, mimeType: "application/json" },
-            redirectURL: "", headersSize: -1, bodySize: -1,
-        },
-        cache: {}, timings: { send: 0, wait: 0, receive: 0 },
+            postData: {mimeType: "application/json", text: JSON.stringify(body)},
+        }, response: {
+            status: 0,
+            statusText: "",
+            httpVersion: "HTTP/1.1",
+            cookies: [],
+            headers: [],
+            content: {size: 0, mimeType: "application/json"},
+            redirectURL: "",
+            headersSize: -1,
+            bodySize: -1,
+        }, cache: {}, timings: {send: 0, wait: 0, receive: 0},
     };
 }
 
-
-
-
+/**
+ * buildTopIdsSql — create a TOP(N) SELECT for id values honoring static filters.
+ * Builds a WHERE clause from schema staticValue fields and enforces NOT NULL id.
+ *
+ * @param {string} entityKey - Table/entity name used in FROM.
+ * @param {Object} entity - Entity config containing schema and update mapping.
+ * @param {number} numRows - Number of ids to return (TOP N).
+ * @returns {string} SQL text.
+ */
 function buildTopIdsSql(entityKey, entity, numRows) {
     const idParam0 = entity?.routes?.update?.params?.[0];
     if (!idParam0 || !idParam0.column) die(`Entity "${entityKey}" missing routes.update.params[0].column.`);
@@ -421,15 +546,16 @@ function buildTopIdsSql(entityKey, entity, numRows) {
     where.push(`${idCol} IS NOT NULL`);
 
     const n = Math.max(1, Number(numRows) || 1);
-    return [
-        `SELECT TOP (${n}) ${idCol}`,
-        `FROM ${entityKey}`,
-        `WHERE ${where.join(" AND ")}`,
-        `ORDER BY NEWID();`,
-    ].join("\n");
+    return [`SELECT TOP (${n}) ${idCol}`, `FROM ${entityKey}`, `WHERE ${where.join(" AND ")}`, `ORDER BY NEWID();`,].join("\n");
 }
 
-/* ----------------------- Update-source & key selection ----------------------- */
+/**
+ * createExistingKeyPicker — build a key-selection helper from a CSV file.
+ * Parses headers/rows and returns a picker closure honoring the chosen reuse policy.
+ *
+ * @param {{csvPath:string, fields:string[], reusePolicy?:string}} updateSource - Source descriptor.
+ * @returns {Function} pickNextKey() → Object mapping key columns to values.
+ */
 function createExistingKeyPicker(updateSource) {
     if (!updateSource || !updateSource.csvPath || !Array.isArray(updateSource.fields) || !updateSource.fields.length) {
         throw new Error('Invalid updateSource: expected { csvPath, fields[], reusePolicy }');
@@ -472,7 +598,9 @@ function createExistingKeyPicker(updateSource) {
                 if (ptr >= pool.length) throw new Error("Key pool exhausted (sequential-no-reuse).");
                 return pool[ptr++];
             case "sequential-with-reuse": {
-                const v = pool[ptr % pool.length]; ptr++; return v;
+                const v = pool[ptr % pool.length];
+                ptr++;
+                return v;
             }
             case "random-no-reuse":
                 if (!pool.length) throw new Error("Key pool exhausted (random-no-reuse).");
@@ -484,6 +612,15 @@ function createExistingKeyPicker(updateSource) {
     };
 }
 
+/**
+ * applyRouteParam — substitute an id value into a parameterized route path.
+ * Replaces tokens like ':id', '{id}', '<id>' and column-specific variants; otherwise appends the id.
+ *
+ * @param {string} updatePath - Route template.
+ * @param {string} idCol - Name of the id parameter/column.
+ * @param {string|number} idVal - Value to substitute.
+ * @returns {string} Final path with id applied.
+ */
 function applyRouteParam(updatePath, idCol, idVal) {
     let out = String(updatePath || "");
     const tryReplace = (pat) => {
@@ -491,24 +628,24 @@ function applyRouteParam(updatePath, idCol, idVal) {
         out = out.replace(pat, String(idVal));
         return out !== before;
     };
-    const candidates = [
-        new RegExp(`:${idCol}\\b`),
-        new RegExp(`\\{${idCol}\\}`),
-        new RegExp(`<${idCol}>`),
-        /:id\b/i, /\{id}/i, /<id>/i
-    ];
+    const candidates = [new RegExp(`:${idCol}\\b`), new RegExp(`\\{${idCol}\\}`), new RegExp(`<${idCol}>`), /:id\b/i, /\{id}/i, /<id>/i];
     for (const c of candidates) if (tryReplace(c)) return out;
     return out.replace(/\/+$/, "") + "/" + encodeURIComponent(String(idVal));
 }
 
-/* --------------------------- UX helpers for UPDATE --------------------------- */
+/**
+ * configureUpdateSourceUX — interactive setup for choosing an update CSV and policy.
+ * Detects header column, chooses reuse policy, persists minimal metadata to the config.
+ *
+ * @param {string} entityKey - Entity being configured.
+ * @param {Object} entity - Mutable entity config reference.
+ * @param {Object} bits - Routing essentials from requireEntityBits.
+ * @param {number} nUpdate - Number of UPDATE calls requested (for context/help).
+ * @returns {Promise<void>}
+ */
 async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
     while (true) {
-        const v = (await askInlinePrefilled(
-            null,
-            `Filename of Existing data for ${entityKey}, or H for Help:`,
-            entity?.updateSource?.csvPath || entity?.existingDataPath || ""
-        )).trim();
+        const v = (await askInlinePrefilled(null, `Filename of Existing data for ${entityKey}, or H for Help:`, entity?.updateSource?.csvPath || entity?.existingDataPath || "")).trim();
 
         if (/^(h|help)$/i.test(v)) {
             console.log("\nRun this SQL to select existing data, then export or copy it (with headers) to a .csv file:\n");
@@ -517,15 +654,24 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
             continue;
         }
 
-        if (!v) { console.log("✖ Please enter a filename, or H for Help."); continue; }
-        if (!fs.existsSync(v)) { console.log("✖ File not found. Try again, or H for Help."); continue; }
+        if (!v) {
+            console.log("✖ Please enter a filename, or H for Help.");
+            continue;
+        }
+        if (!fs.existsSync(v)) {
+            console.log("✖ File not found. Try again, or H for Help.");
+            continue;
+        }
 
         // Auto-detect header (prefer configured idCol; else first header)
         const raw = fs.readFileSync(v, "utf8");
         const firstLine = (raw.split(/\r?\n/).find(Boolean) || "");
         const delim = firstLine.includes("\t") ? "\t" : ",";
         const headers = firstLine.split(delim).map(h => String(h || "").trim()).filter(Boolean);
-        if (!headers.length) { console.log("✖ Could not detect headers in that file."); continue; }
+        if (!headers.length) {
+            console.log("✖ Could not detect headers in that file.");
+            continue;
+        }
 
         const chosenHeader = headers.includes(bits.idCol) ? bits.idCol : headers[0];
         console.log(`Detected column: ${chosenHeader}`);
@@ -540,17 +686,14 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
 
         const choice = (await askInlinePrefilled(null, "Choose [default=4]:", "4")).trim();
         const reuseMap = {
-            "1": "sequential-no-reuse",
-            "2": "sequential-with-reuse",
-            "3": "random-no-reuse",
-            "4": "random-with-reuse",
+            "1": "sequential-no-reuse", "2": "sequential-with-reuse", "3": "random-no-reuse", "4": "random-with-reuse",
         };
         // if user hits enter (choice=""), default to "4"
         const reusePolicy = reuseMap[choice || "4"];
 
         // Persist minimal metadata, keeping user's **relative** path exactly as entered
         const csvPath = v;
-        entity.updateSource = { csvPath, fields: [chosenHeader], reusePolicy };
+        entity.updateSource = {csvPath, fields: [chosenHeader], reusePolicy};
         entity.existingDataPath = csvPath; // legacy alias if anything reads it
 
         // Save to config immediately so it’s remembered
@@ -568,9 +711,12 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
     }
 }
 
-/* ====================================================================== */
-/*                                   MAIN                                 */
-/* ====================================================================== */
+/**
+ * main — interactive HAR generator entry point (IIFE).
+ * Queues per-entity CREATE/UPDATE entries, prompts for output path, shuffles, and writes a single HAR.
+ *
+ * @returns {Promise<void>}
+ */
 (async function main() {
     console.log("=== HAR Generator (G mode) ===\n");
 
@@ -620,7 +766,10 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
             if (canon) entityKey = canon;
         }
 
-        if (!entityKey) { console.log("✖ Invalid selection. Try again.\n"); continue; }
+        if (!entityKey) {
+            console.log("✖ Invalid selection. Try again.\n");
+            continue;
+        }
         console.log(`Selected: ${entityKey}`);
 
         const entity = cfg.entities[entityKey];
@@ -657,7 +806,7 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
         entity.fill.updatePercent = updatePercent;
         const cfgNow = loadJsonc(CONFIG_PATH, null);
         if (cfgNow && cfgNow.entities && cfgNow.entities[entityKey]) {
-            cfgNow.entities[entityKey].fill = { createPercent, updatePercent };
+            cfgNow.entities[entityKey].fill = {createPercent, updatePercent};
             saveJsonc(CONFIG_PATH, cfgNow);
         }
 
@@ -669,10 +818,16 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
 
         // CREATE
         for (let i = 0; i < nCreate; i++) {
-            const body = buildBodyForSide({ side: "create", schema, csvRow: null, csvHeadersLower: null, fillPercent: createPercent, entity });
-            const shaped = shapePayload({ side: "create", entity, body });
+            const body = buildBodyForSide({
+                side: "create",
+                schema,
+                csvRow: null,
+                csvHeadersLower: null,
+                fillPercent: createPercent
+            });
+            const shaped = shapePayload({side: "create", entity, body});
             const url = joinUrl(bits.host, bits.createPath);
-            allEntries.push(buildHarEntry({ method: bits.createMethod, url, body: shaped }));
+            allEntries.push(buildHarEntry({method: bits.createMethod, url, body: shaped}));
         }
 
         // UPDATE
@@ -682,22 +837,26 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
             if (!idVal) die(`No "${bits.idCol}" value present in selected key row.`);
 
             const csvHeadersLower = Object.keys(keyObj).map(k => k.toLowerCase());
-            const body = buildBodyForSide({ side: "update", schema, csvRow: keyObj, csvHeadersLower, fillPercent: updatePercent, entity });
-            const shaped = shapePayload({ side: "update", entity, body });
+            const body = buildBodyForSide({
+                side: "update",
+                schema,
+                csvRow: keyObj,
+                csvHeadersLower,
+                fillPercent: updatePercent
+            });
+            const shaped = shapePayload({side: "update", entity, body});
 
             const updatePathApplied = applyRouteParam(bits.updatePath, bits.idCol, idVal);
             const url = joinUrl(bits.host, updatePathApplied);
-            allEntries.push(buildHarEntry({ method: bits.updateMethod, url, body: shaped }));
+            allEntries.push(buildHarEntry({method: bits.updateMethod, url, body: shaped}));
         }
 
-        const prev = perEntityTotals.get(entityKey) || { creates: 0, updates: 0 };
-        prev.creates += nCreate; prev.updates += nUpdate;
+        const prev = perEntityTotals.get(entityKey) || {creates: 0, updates: 0};
+        prev.creates += nCreate;
+        prev.updates += nUpdate;
         perEntityTotals.set(entityKey, prev);
 
-        console.log(
-            `\nQueued ${nCreate} ${pluralUpper(nCreate, "CREATE", "CREATES")} and ` +
-            `${nUpdate} ${pluralUpper(nUpdate, "UPDATE", "UPDATES")} for ${entityKey}.\n`
-        );
+        console.log(`\nQueued ${nCreate} ${pluralUpper(nCreate, "CREATE", "CREATES")} and ` + `${nUpdate} ${pluralUpper(nUpdate, "UPDATE", "UPDATES")} for ${entityKey}.\n`);
     }
 
     // If nothing queued, just exit quietly.
@@ -707,11 +866,7 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
     console.log("Summary:");
     for (const [ekey, totals] of perEntityTotals.entries()) {
         const total = totals.creates + totals.updates;
-        console.log(
-            `  ${ekey} — ${total} calls (` +
-            `${totals.creates} ${pluralUpper(totals.creates, "CREATE", "CREATES")} / ` +
-            `${totals.updates} ${pluralUpper(totals.updates, "UPDATE", "UPDATES")})`
-        );
+        console.log(`  ${ekey} — ${total} calls (` + `${totals.creates} ${pluralUpper(totals.creates, "CREATE", "CREATES")} / ` + `${totals.updates} ${pluralUpper(totals.updates, "UPDATE", "UPDATES")})`);
     }
     console.log(`Total queued: ${allEntries.length} ${entryWord(allEntries.length)}\n`);
 
@@ -743,7 +898,7 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
     // Randomize final call order within the HAR
     shuffleInPlace(allEntries);
 
-    const har = { log: { version: "1.2", creator: { name: "build-har-generator", version: "G" }, entries: allEntries } };
+    const har = {log: {version: "1.2", creator: {name: "build-har-generator", version: "G"}, entries: allEntries}};
     fs.writeFileSync(outPath, JSON.stringify(har, null, 2), "utf8");
 
     // Remember globally for future sessions (keep relative form)

@@ -1,7 +1,7 @@
 /**
  * @file build-har-common.js
- * @summary Shared utility library for CLI prompts, JSONC I/O, entity helpers, and small generators.
- * @description Used by the config wizard, HAR generator, and HAR runner to keep UX and parsing consistent.
+ * @summary Shared utilities for prompts, JSONC I/O, JWT/base64 helpers, URL/text formatting, and small generators.
+ * @description Used by the config wizard, HAR generator, and HAR runner to keep UX, parsing, and I/O behavior consistent across tools.
  */
 "use strict";
 
@@ -10,16 +10,13 @@ const path = require("path");
 const readline = require("readline");
 const crypto = require("crypto");
 
-
 /** Default config path used by tools that need a shared JSONC mapping file. */
 const CONFIG_PATH = "build-har.config.json";
-
 
 /** Create a readline interface bound to stdin/stdout. @returns {import('readline').Interface} */
 function rlCreate() {
     return readline.createInterface({ input: process.stdin, output: process.stdout });
 }
-
 
 /** Prompt for input; accepts (rl,msg) or (msg). Trims the result. */
 function ask(rlOrMsg, maybeMsg) {
@@ -62,8 +59,6 @@ async function askYesNo(rl, label, defaultYes = true) {
     }
 }
 
-
-
 /** Return an existing readline or create a temporary one with auto-close flag. */
 function _ensureRl(maybeRl) {
     if (maybeRl && typeof maybeRl.question === "function") {
@@ -72,7 +67,6 @@ function _ensureRl(maybeRl) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     return { rl, autoClose: true };
 }
-
 
 /** Prompt with the current value prefilled in the input buffer so it can be edited in place. */
 function askInlinePrefilled(rl, label, defValue) {
@@ -88,7 +82,6 @@ function askInlinePrefilled(rl, label, defValue) {
         if (shown) _rl.write(shown);
     });
 }
-
 
 /** Remove /* *\/ and // comments from a JSONC string so it can be parsed as JSON. */
 function stripJsonc(s) {
@@ -129,7 +122,6 @@ function canonicalEntityKey(cfg, input) {
     return null;
 }
 
-
 /** Generate a YYYYMMDD-based filename with numeric suffix when collisions occur. */
 function uniqueDatedFilename(base, ext) {
     const d = new Date();
@@ -146,16 +138,33 @@ function uniqueDatedFilename(base, ext) {
 /* ====================== Generic JSON/HAR convenience ====================== */
 function truncateUrl(url) { return !url ? '' : (url.length > 75 ? url.slice(0,75) + '...' : url); }
 
-
+/**
+ * decode — decode Buffers to UTF‑8; pass non‑buffers through as strings.
+ *
+ * @param {any} bufOrStr - input parameter.
+ * @returns {any} Result.
+ */
 function decode(bufOrStr) {
     if (Buffer.isBuffer(bufOrStr)) return bufOrStr.toString();
     return String(bufOrStr || "");
 }
+/**
+ * formToObj — convert iterable [key, value] pairs into a plain object.
+ *
+ * @param {any} entries - input parameter.
+ * @returns {any} Result.
+ */
 function formToObj(entries) {
     const out = {};
     for (const [k, v] of entries || []) out[k] = v;
     return out;
 }
+/**
+ * tryExtractJson — locate and parse the first JSON object/array embedded in a string; return null on failure.
+ *
+ * @param {any} s - input parameter.
+ * @returns {any} Result.
+ */
 function tryExtractJson(s) {
     const m = String(s || "").match(/\{[\s\S]*}|\[[\s\S]*]/);
     if (!m) return null;
@@ -163,6 +172,13 @@ function tryExtractJson(s) {
 }
 
 /* ============================ Deep key helpers ============================ */
+/**
+ * flattenToDotPaths — flatten a nested object into dot‑path keys (e.g., a.b.c) for easy mapping/inspection.
+ *
+ * @param {any} obj - input parameter.
+ * @param {any} prefix - input parameter.
+ * @returns {any} Result.
+ */
 function flattenToDotPaths(obj, prefix = "") {
     const out = {};
     for (const [k, v] of Object.entries(obj || {})) {
@@ -175,8 +191,22 @@ function flattenToDotPaths(obj, prefix = "") {
     }
     return out;
 }
+/**
+ * collectKeysDeep — collect all dot‑path keys from a nested object into a flat list.
+ *
+ * @param {any} obj - input parameter.
+ * @returns {any} Result.
+ */
 function collectKeysDeep(obj) { return Object.keys(flattenToDotPaths(obj || {})); }
 
+/**
+ * askPrefill — prompt in the CLI, showing defaults/prefill where applicable, and normalize the user's response.
+ *
+ * @param {any} label - input parameter.
+ * @param {any} programmedDefault - input parameter.
+ * @param {any} configValue - input parameter.
+ * @returns {any} Result.
+ */
 function askPrefill(label, programmedDefault, configValue) {
     const { rl, autoClose } = _ensureRl(null);
     return new Promise(resolve => {
@@ -193,7 +223,14 @@ function askPrefill(label, programmedDefault, configValue) {
     });
 }
 
-
+/**
+ * askNumberPrefill — prompt in the CLI, showing defaults/prefill where applicable, and normalize the user's response.
+ *
+ * @param {any} label - input parameter.
+ * @param {any} programmedDefault - input parameter.
+ * @param {any} configValue - input parameter.
+ * @returns {any} Result.
+ */
 function askNumberPrefill(label, programmedDefault, configValue) {
     // Mirrors the runner's UX: shows [default] hint and pre-fills with config value if present.
     return askPrefill(label, String(programmedDefault), (configValue ?? '') === '' ? '' : String(configValue))
@@ -204,6 +241,14 @@ function askNumberPrefill(label, programmedDefault, configValue) {
         });
 }
 
+/**
+ * askYesNoPrefill — prompt in the CLI, showing defaults/prefill where applicable, and normalize the user's response.
+ *
+ * @param {any} label - input parameter.
+ * @param {any} programmedDefaultBool - input parameter.
+ * @param {any} configYN - input parameter.
+ * @returns {any} Result.
+ */
 async function askYesNoPrefill(label, programmedDefaultBool, configYN) {
     // Mirrors the runner's UX: (y/N) with [Y] or [N] shown and optional prefill of 'Y'/'N'.
     const programmedDefChar = programmedDefaultBool ? 'Y' : 'N';
@@ -222,8 +267,6 @@ async function askYesNoPrefill(label, programmedDefaultBool, configYN) {
     });
 }
 
-
-
 function localTsYmdHms(d = new Date()) {
     const pad = n => String(n).padStart(2, '0');
     return [
@@ -232,16 +275,39 @@ function localTsYmdHms(d = new Date()) {
         pad(d.getDate())
     ].join('-') + ' ' + [pad(d.getHours()), pad(d.getMinutes()), pad(d.getSeconds())].join(':');
 }
+/**
+ * tsForFile — build a filesystem‑safe timestamp string suitable for filenames.
+ * @returns {any} Result.
+ */
 function tsForFile() { return localTsYmdHms().replace(/[:-]/g, '').replace(/\.\d{3}Z$/, 'Z'); }
 
+/**
+ * toCsvField — escape and quote values when needed for CSV output.
+ *
+ * @param {any} v - input parameter.
+ * @returns {any} Result.
+ */
 function toCsvField(v) {
     if (v === null || v === undefined) return '';
     const s = String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
+/**
+ * ensureDirForFile — create parent directories for a file path if they do not exist.
+ *
+ * @param {any} fp - input parameter.
+ * @returns {any} Result.
+ */
 function ensureDirForFile(fp) { fs.mkdirSync(path.dirname(fp), { recursive: true }); }
 
+/**
+ * percentile — compute an empirical percentile (no interpolation) from a numeric array.
+ *
+ * @param {any} values - input parameter.
+ * @param {any} p - input parameter.
+ * @returns {any} Result.
+ */
 function percentile(values, p) {
     if (!values.length) return 0;
     const sorted = [...values].sort((a,b)=>a-b);
@@ -249,24 +315,56 @@ function percentile(values, p) {
     return sorted[Math.min(idx, sorted.length - 1)];
 }
 
+/**
+ * base64urlEncodeUtf8 — utility helper; see implementation for details.
+ *
+ * @param {any} str - input parameter.
+ * @returns {any} Result.
+ */
 function base64urlEncodeUtf8(str) {
     return Buffer.from(str, 'utf8').toString('base64').replace(/=/g, '').replace(/\+/g,'-').replace(/\//g,'_');
 }
 
+/**
+ * base64urlEncodeBuf — utility helper; see implementation for details.
+ *
+ * @param {any} buf - input parameter.
+ * @returns {any} Result.
+ */
 function base64urlEncodeBuf(buf) {
     return Buffer.from(buf).toString('base64').replace(/=/g, '').replace(/\+/g,'-').replace(/\//g,'_');
 }
 
+/**
+ * base64urlDecodeToUtf8 — utility helper; see implementation for details.
+ *
+ * @param {any} b64u - input parameter.
+ * @returns {any} Result.
+ */
 function base64urlDecodeToUtf8(b64u) {
     const padLen = (4 - (b64u.length % 4)) % 4;
     const b64 = b64u.replace(/-/g,'+').replace(/_/g,'/') + '='.repeat(padLen);
     return Buffer.from(b64, 'base64').toString('utf8');
 }
 
+/**
+ * signHS256 — utility helper; see implementation for details.
+ *
+ * @param {any} input - input parameter.
+ * @param {any} secret - input parameter.
+ * @returns {any} Result.
+ */
 function signHS256(input, secret) {
     return base64urlEncodeBuf(crypto.createHmac('sha256', secret).update(input).digest());
 }
 
+/**
+ * refreshCompactJWT — utility helper; see implementation for details.
+ *
+ * @param {any} jwt - input parameter.
+ * @param {any} secret - input parameter.
+ * @returns {any} Result.
+ */
 function refreshCompactJWT(jwt, secret) {
     try {
         const parts = jwt.split('.');
@@ -285,12 +383,26 @@ function refreshCompactJWT(jwt, secret) {
     } catch { return { ok: false, token: jwt }; }
 }
 
+/**
+ * joinUrl — utility helper; see implementation for details.
+ *
+ * @param {any} host - input parameter.
+ * @param {any} p - input parameter.
+ * @returns {any} Result.
+ */
 function joinUrl(host, p) {
     const h = String(host || "").replace(/\/+$/, "");
     const s = String(p || "").replace(/^\/+/, "");
     return `${h}/${s}`;
 }
 
+/**
+ * chooseByPercent — utility helper; see implementation for details.
+ *
+ * @param {any} arr - input parameter.
+ * @param {any} percent - input parameter.
+ * @returns {any} Result.
+ */
 function chooseByPercent(arr, percent) {
     const len = Array.isArray(arr) ? arr.length : 0;
     const p = Math.max(0, Math.min(100, Number(percent) || 0));
@@ -301,6 +413,12 @@ function chooseByPercent(arr, percent) {
     return copy.slice(0, n);
 }
 
+/**
+ * _sqlIntCapForType — utility helper; see implementation for details.
+ *
+ * @param {any} t - input parameter.
+ * @returns {any} Result.
+ */
 function _sqlIntCapForType(t) {
     const T = String(t || '').toUpperCase();
     if (T.includes('TINYINT'))   return 255;
@@ -309,6 +427,13 @@ function _sqlIntCapForType(t) {
     return 2147483647; // INT default
 }
 
+/**
+ * clampIntForSqlType — utility helper; see implementation for details.
+ *
+ * @param {any} t - input parameter.
+ * @param {any} n - input parameter.
+ * @returns {any} Result.
+ */
 function clampIntForSqlType(t, n) {
     if (n == null || n === "") return n;
     let x = Number(n);
@@ -326,6 +451,13 @@ function clampIntForSqlType(t, n) {
     return Math.trunc(x);
 }
 
+/**
+ * coerceAndNormalizeForChangelog — utility helper; see implementation for details.
+ *
+ * @param {any} col - input parameter.
+ * @param {any} val - input parameter.
+ * @returns {any} Result.
+ */
 function coerceAndNormalizeForChangelog(col, val) {
     const t = String(col?.type || '').toUpperCase();
     if (val == null) return val;
@@ -353,6 +485,12 @@ function coerceAndNormalizeForChangelog(col, val) {
     return val;
 }
 
+/**
+ * sqlLiteral — utility helper; see implementation for details.
+ *
+ * @param {any} v - input parameter.
+ * @returns {any} Result.
+ */
 function sqlLiteral(v) {
     if (v === null || v === undefined) return "NULL";
     if (typeof v === "number") return String(v);
@@ -360,13 +498,32 @@ function sqlLiteral(v) {
     return `'${String(v).replace(/'/g, "''")}'`;
 }
 
+/**
+ * _titleCase — utility helper; see implementation for details.
+ *
+ * @param {any} s - input parameter.
+ * @returns {any} Result.
+ */
 function _titleCase(s) { s = String(s || ""); return s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s; }
 
+/**
+ * simpleEntityName — utility helper; see implementation for details.
+ *
+ * @param {any} entityKey - input parameter.
+ * @returns {any} Result.
+ */
 function simpleEntityName(entityKey) {
     const seg = String(entityKey || "").split("_").pop();
     return _titleCase(seg || entityKey);
 }
 
+/**
+ * shuffleInPlace — utility helper; see implementation for details.
+ *
+ * @param {any} arr - input parameter.
+ * @param {any} rng - input parameter.
+ * @returns {any} Result.
+ */
 function shuffleInPlace(arr, rng = Math.random) {
     for (let i = arr.length - 1; i > 0; i--) {
         const j = Math.floor(rng() * (i + 1));
@@ -375,6 +532,14 @@ function shuffleInPlace(arr, rng = Math.random) {
     return arr;
 }
 
+/**
+ * askExistingPathPrefill — utility helper; see implementation for details.
+ *
+ * @param {any} rl - input parameter.
+ * @param {any} label - input parameter.
+ * @param {any} prefill - input parameter.
+ * @returns {any} Result.
+ */
 async function askExistingPathPrefill(rl, label, prefill) {
     const lbl = label.endsWith(':') ? label : `${label}:`;
     while (true) {
@@ -385,6 +550,12 @@ async function askExistingPathPrefill(rl, label, prefill) {
 }
 
 const MAX_DEC19_6_ABS = 9999999999999.999999;
+/**
+ * clampDecimal19_6 — helper for generating representative values that respect SQL types/lengths and DECIMAL(19,6) caps.
+ *
+ * @param {any} n - input parameter.
+ * @returns {any} Result.
+ */
 function clampDecimal19_6(n) {
     if (n == null || n === "") return n;
     let x = Number(n);
@@ -405,10 +576,24 @@ function clampDecimal19_6(n) {
 /* ================================ Exports ================================ */
 
 // ---- Unified prompt factory ----
+/**
+ * makePrompts — utility helper; see implementation for details.
+ *
+ * @param {any} rl - input parameter.
+ * @returns {any} Result.
+ */
 function makePrompts(rl) {
     if (!rl || typeof rl.question !== 'function') throw new Error('makePrompts requires a readline interface');
     const ask = (q) => new Promise(res => rl.question(q, ans => res((ans ?? '').trim())));
 
+    /**
+ * askPrefill — prompt in the CLI, showing defaults/prefill where applicable, and normalize the user's response.
+ *
+ * @param {any} label - input parameter.
+ * @param {any} programmedDefault - input parameter.
+ * @param {any} configValue - input parameter.
+ * @returns {any} Result.
+ */
     async function askPrefill(label, programmedDefault, configValue) {
         const shownDefault = programmedDefault ?? '';
         if (configValue !== undefined && configValue !== null && configValue !== '') rl.write(String(configValue));
@@ -416,6 +601,14 @@ function makePrompts(rl) {
         return ans === '' ? shownDefault : ans;
     }
 
+    /**
+ * askNumberPrefill — prompt in the CLI, showing defaults/prefill where applicable, and normalize the user's response.
+ *
+ * @param {any} label - input parameter.
+ * @param {any} programmedDefault - input parameter.
+ * @param {any} configValue - input parameter.
+ * @returns {any} Result.
+ */
     async function askNumberPrefill(label, programmedDefault, configValue) {
         if (configValue !== undefined && configValue !== null && configValue !== '') rl.write(String(configValue));
         const raw = await ask(`${label} [${String(programmedDefault)}]: `);
@@ -423,6 +616,14 @@ function makePrompts(rl) {
         return (!Number.isFinite(n) || n < 0) ? programmedDefault : n;
     }
 
+    /**
+ * askYesNoPrefill — prompt in the CLI, showing defaults/prefill where applicable, and normalize the user's response.
+ *
+ * @param {any} label - input parameter.
+ * @param {any} programmedDefaultBool - input parameter.
+ * @param {any} configYN - input parameter.
+ * @returns {any} Result.
+ */
     async function askYesNoPrefill(label, programmedDefaultBool, configYN) {
         const defChar = programmedDefaultBool ? 'Y' : 'N';
         if (configYN === 'Y' || configYN === 'N') rl.write(configYN);
@@ -448,7 +649,6 @@ module.exports = { makePrompts,
     // Entity helpers
     listEntitiesCaseInsensitive, canonicalEntityKey, collectKeysDeep,
 
-
     // Filenames
     uniqueDatedFilename,
 
@@ -456,11 +656,9 @@ module.exports = { makePrompts,
     decode, formToObj, tryExtractJson,
     truncateUrl,
     percentile,
-    base64urlEncodeUtf8,
     clampIntForSqlType,
     askPrefill,
     shuffleInPlace,
-    signHS256,
     coerceAndNormalizeForChangelog,
     tsForFile,
     sqlLiteral,
@@ -468,15 +666,11 @@ module.exports = { makePrompts,
     _sqlIntCapForType,
     toCsvField,
     refreshCompactJWT,
-    base64urlDecodeToUtf8,
     ensureDirForFile,
     joinUrl,
-    base64urlEncodeBuf,
-    _titleCase,
     chooseByPercent,
     askExistingPathPrefill,
     localTsYmdHms,
     clampDecimal19_6,
     askNumberPrefill,
     askYesNoPrefill};
-

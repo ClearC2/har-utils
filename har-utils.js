@@ -1,13 +1,10 @@
 #!/usr/bin/env node
 /**
  * @file har-utils.js
- * @summary Interactive menu/launcher for the HAR toolchain.
- * @description Presents C/G/R/Q options, spawns the respective script as a child process,
- * inherits stdio, and returns to the menu after each run until Quit is chosen.
+ * @summary Menu/launcher for the HAR toolchain.
+ * @description Presents C/G/R/Q options, spawns the respective script with inherited stdio, and loops until Quit.
  */
 
-
-/** Child-process API used to execute selected sub-tools with inherited stdio. */
 const { spawn } = require('child_process');
 /** Readline helpers for menu input and prompts with defaults. */
 const { rlCreate, askWithDefault } = require('./build-har-common');
@@ -71,8 +68,7 @@ async function runOnce(script) {
                     'HAR Runner (R mode)';
 
         console.log(`\nLaunching ${label}...\n`);
-        const code = await runOnce(script);
-
+        await runOnce(script);
 
     }
 })();

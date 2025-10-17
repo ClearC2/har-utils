@@ -1733,11 +1733,10 @@ function rememberSourcePaths(cfg, entityKey, paths) {
 
 /**
  * headersEditor — header-only editor invoked from the main T/H/S/Q/X menu.
- * Flow:
- *  - Ask which scope: (C)REATE, (U)PDATE, (G)ET, or (A)LL.
- *  - For C/U/G: go directly into a simple table editor loop for that route.
- *  - For A: unify headers across C+U+G, then every change applies to all three.
- *  - e[X]it always returns to the main menu (no inner route switch, no sync cmd).
+ * Scope selection once (C/U/G/A). No inner route switching.
+ * In A mode, edits apply to C+U+G immediately.
+ * Legend matches the main Table editor:
+ *   <#|name> to edit, [A]DD, [D]EL #|name, X
  */
 async function headersEditor(rl, cfg, entityKey) {
     const ent = cfg.entities[entityKey];
@@ -1756,7 +1755,7 @@ async function headersEditor(rl, cfg, entityKey) {
         if (!ent.routes[k].method && k === 'get') ent.routes[k].method = 'GET';
     }
 
-    // Choose scope once; no nested re-prompting or route switching
+    // Choose scope once
     const scopeAns = (await askWithDefault(
         rl,
         `Edit which headers? (C)REATE, (U)PDATE, (G)ET, or (A)LL [A]:`,
@@ -1767,7 +1766,7 @@ async function headersEditor(rl, cfg, entityKey) {
             : scopeAns.startsWith('G') ? 'G'
                 : 'A';
 
-    // Sanitizer: trim, de-dup by case-insensitive name + exact value, keep order
+    // Helpers
     function sanitizeHeaders(arr) {
         if (!Array.isArray(arr)) return [];
         const seen = new Set();
@@ -1783,17 +1782,29 @@ async function headersEditor(rl, cfg, entityKey) {
         }
         return out;
     }
-
     function showTable(label, arr) {
         const rows = (arr || []).map((h, i) => [String(i + 1), h?.name || '', h?.value || '']);
         console.log(`\nHEADERS — ${entityKey} / ${label}`);
-        if (rows.length) {
-            printTable(['#', 'Name', 'Value'], rows);
-        } else {
-            console.log('(none)');
-        }
+        if (rows.length) printTable(['#', 'Name', 'Value'], rows); else console.log('(none)');
+        console.log('\nCommands:');
+        console.log('<row# | name>      (starts interactive edit for that row)');
+        console.log('[A]DD              (append a new blank row, then prompt for its values)');
+        console.log('[D]EL #|name       (delete that row; asks for confirmation)');
+        console.log('X                  (e[X]it Header Editor)');
     }
-
+    function resolveIndexByToken(arr, token) {
+        if (!arr || !arr.length) return -1;
+        const t = String(token ?? '').trim();
+        if (!t) return -1;
+        const maybe = Number(t);
+        if (Number.isInteger(maybe) && maybe >= 1 && maybe <= arr.length) return maybe - 1;
+        const wanted = t.toLowerCase();
+        for (let i = 0; i < arr.length; i++) {
+            const nm = String(arr[i]?.name ?? '').toLowerCase();
+            if (nm === wanted) return i;
+        }
+        return -1;
+    }
     async function addItem(arr) {
         const name  = await askInlinePrefilled(rl, `(${entityKey}) Header name:`, '');
         const trimmed = String(name || '').trim();
@@ -1801,108 +1812,121 @@ async function headersEditor(rl, cfg, entityKey) {
         const value = await askInlinePrefilled(rl, `(${entityKey}) Header value:`, '');
         arr.push({ name: trimmed, value: String(value || '').trim() });
     }
-    async function editItem(arr) {
-        if (!arr.length) { console.log('(empty)'); return; }
-        const idxRaw = await askInlinePrefilled(rl, '# to edit (1..n)', '1');
-        const idx = Math.max(1, parseInt(idxRaw, 10)) - 1;
-        if (!(idx in arr)) { console.log('Invalid row.'); return; }
+    async function editItemAt(arr, idx) {
         const cur   = arr[idx] || {};
         const name  = await askInlinePrefilled(rl, `(${entityKey}) Header name:`,  cur?.name  || '');
         const value = await askInlinePrefilled(rl, `(${entityKey}) Header value:`, cur?.value || '');
         if (String(name).trim()) arr[idx] = { name: String(name).trim(), value: String(value || '').trim() };
     }
-    async function deleteItem(arr) {
-        if (!arr.length) { console.log('(empty)'); return; }
-        const idxRaw = await askInlinePrefilled(rl, '# to delete (1..n)', '1');
-        const idx = Math.max(1, parseInt(idxRaw, 10)) - 1;
-        if (!(idx in arr)) { console.log('Invalid row.'); return; }
-        arr.splice(idx, 1);
+    async function deleteItemAt(arr, idx) {
+        const confirm = await askYesNo(rl, `Delete row ${idx + 1}?`, false);
+        if (confirm) arr.splice(idx, 1);
     }
 
+    // ===== ALL mode =====
     if (scope === 'A') {
-        // Unify: start from the longest set, then write to all three immediately
         const sizes = [
             ['create', ent.routes.create.headers.length],
             ['update', ent.routes.update.headers.length],
             ['get',    ent.routes.get.headers.length],
         ].sort((a,b) => b[1]-a[1]);
         let all = JSON.parse(JSON.stringify(ent.routes[sizes[0][0]].headers || []));
-        // Apply the unified baseline to all three
-        ent.routes.create.headers = JSON.parse(JSON.stringify(all));
-        ent.routes.update.headers = JSON.parse(JSON.stringify(all));
-        ent.routes.get.headers    = JSON.parse(JSON.stringify(all));
+        const applyAll = () => {
+            all = sanitizeHeaders(all);
+            ent.routes.create.headers = JSON.parse(JSON.stringify(all));
+            ent.routes.update.headers = JSON.parse(JSON.stringify(all));
+            ent.routes.get.headers    = JSON.parse(JSON.stringify(all));
+        };
+        applyAll();
 
         while (true) {
             showTable('ALL', all);
-            console.log('\n[a] add   [e] edit   [d] delete   e[X]it');
-            const cmd = (await askWithDefault(rl, 'headers> ', '')).trim().toUpperCase();
-            if (!cmd) continue;
+            const line = (await askWithDefault(rl, 'Command (#,A,D,X)', '')).trim();
+            if (!line) continue;
+            const parts = line.split(/\s+/, 2);
+            const cmd = parts[0].toUpperCase();
+
             if (cmd === 'X' || cmd === 'EXIT') break;
-            if (cmd === 'A') { await addItem(all);    }
-            else if (cmd === 'E') { await editItem(all);   }
-            else if (cmd === 'D') { await deleteItem(all); }
-            else { console.log('Unknown command.'); continue; }
 
-            // Reflect every change into all three immediately
-            const cleaned = sanitizeHeaders(all);
-            all = cleaned;
-            ent.routes.create.headers = JSON.parse(JSON.stringify(cleaned));
-            ent.routes.update.headers = JSON.parse(JSON.stringify(cleaned));
-            ent.routes.get.headers    = JSON.parse(JSON.stringify(cleaned));
+            if (cmd === 'A' || cmd === 'ADD') {
+                await addItem(all); applyAll(); continue;
+            }
+            if (cmd === 'D' || cmd === 'DEL') {
+                const idx = resolveIndexByToken(all, parts[1]);
+                if (idx >= 0) { await deleteItemAt(all, idx); applyAll(); }
+                else console.log('Row not found. Use a row number or exact header name.');
+                continue;
+            }
+
+            // Otherwise treat the input as an edit token (<#|name>)
+            const idx = resolveIndexByToken(all, line);
+            if (idx >= 0) { await editItemAt(all, idx); applyAll(); }
+            else console.log('Unknown command. Use <#|name>, A, D <#|name>, or X.');
         }
-
-        // Final sanitize and persist on exit
-        const cleaned = sanitizeHeaders(all);
-        ent.routes.create.headers = JSON.parse(JSON.stringify(cleaned));
-        ent.routes.update.headers = JSON.parse(JSON.stringify(cleaned));
-        ent.routes.get.headers    = JSON.parse(JSON.stringify(cleaned));
+        applyAll();
         return;
     }
 
-    // Single route path (no route switching inside)
+    // ===== Single-route mode (C/U/G) =====
     const k = (scope === 'U') ? 'update' : (scope === 'G' ? 'get' : 'create');
     let arr = ent.routes[k].headers;
 
     while (true) {
         showTable(k.toUpperCase(), arr);
-        console.log('\n[a] add   [e] edit   [d] delete   e[X]it');
-        const cmd = (await askWithDefault(rl, 'headers> ', '')).trim().toUpperCase();
-        if (!cmd) continue;
+        const line = (await askWithDefault(rl, 'Command (#,A,D,X)', '')).trim();
+        if (!line) continue;
+        const parts = line.split(/\s+/, 2);
+        const cmd = parts[0].toUpperCase();
+
         if (cmd === 'X' || cmd === 'EXIT') break;
-        if (cmd === 'A') { await addItem(arr);    }
-        else if (cmd === 'E') { await editItem(arr);   }
-        else if (cmd === 'D') { await deleteItem(arr); }
-        else { console.log('Unknown command.'); continue; }
-        arr = sanitizeHeaders(arr);
-        ent.routes[k].headers = arr;
+
+        if (cmd === 'A' || cmd === 'ADD') {
+            await addItem(arr);
+            arr = sanitizeHeaders(arr);
+            ent.routes[k].headers = arr;
+            continue;
+        }
+        if (cmd === 'D' || cmd === 'DEL') {
+            const idx = resolveIndexByToken(arr, parts[1]);
+            if (idx >= 0) { await deleteItemAt(arr, idx); }
+            else console.log('Row not found. Use a row number or exact header name.');
+            arr = sanitizeHeaders(arr);
+            ent.routes[k].headers = arr;
+            continue;
+        }
+
+        // Otherwise treat input as edit token
+        const idx = resolveIndexByToken(arr, line);
+        if (idx >= 0) {
+            await editItemAt(arr, idx);
+            arr = sanitizeHeaders(arr);
+            ent.routes[k].headers = arr;
+        } else {
+            console.log('Unknown command. Use <#|name>, A, D <#|name>, or X.');
+        }
     }
 
-    // Final sanitize and persist on exit
     ent.routes[k].headers = sanitizeHeaders(ent.routes[k].headers);
 }
 
 /**
- * queryStringEditor — interactive editor for routes.*.query on CREATE/UPDATE/GET.
- * Mirrors the headers editor UX: list, add, edit, delete. Values can be static or mapped to a column.
- *
- * @param {any} rl
- * @param {Object} cfg
- * @param {string} entityKey
- * @returns {Promise<void>}
+ * queryStringEditor — per-route (or All when identical) query param editor.
+ * Scope selection once (C/U/G, or A only if all three sets are identical).
+ * No inner route switching. Legend matches main Table editor:
+ *   <#|name> to edit, [A]DD, [D]EL #|name, X
  */
 async function queryStringEditor(rl, cfg, entityKey) {
     const ent = cfg.entities[entityKey];
     ent.routes = ent.routes || {};
-    ent.routes.create = ent.routes.create || {query: []};
-    ent.routes.update = ent.routes.update || {query: []};
-    ent.routes.get = ent.routes.get || {method: 'GET', query: []};
+    ent.routes.create = ent.routes.create || { query: [] };
+    ent.routes.update = ent.routes.update || { query: [] };
+    ent.routes.get    = ent.routes.get    || { method: 'GET', query: [] };
 
-    // Normalize arrays
-    for (const k of ['create', 'update', 'get']) {
+    for (const k of ['create','update','get']) {
         ent.routes[k].query = Array.isArray(ent.routes[k].query) ? ent.routes[k].query : [];
     }
 
-    // Utility to sanitize one query array into stable signature for equality checks
+    // Signature equality (case-insensitive names; mapping string)
     const normSig = (arr) => {
         const rows = [];
         for (const q of (Array.isArray(arr) ? arr : [])) {
@@ -1913,148 +1937,168 @@ async function queryStringEditor(rl, cfg, entityKey) {
                 : `value:${String(q?.value ?? '').trim()}`;
             rows.push([name, mapping]);
         }
-        rows.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+        rows.sort((a,b)=> a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
         return JSON.stringify(rows);
     };
-
     const sigC = normSig(ent.routes.create.query);
     const sigU = normSig(ent.routes.update.query);
     const sigG = normSig(ent.routes.get.query);
     const allSame = (sigC === sigU && sigC === sigG);
 
-    // Route selection prompt — include (A) only when all three sets are identical
     const scopePrompt = allSame
         ? `Edit which querystrings? (C)REATE, (U)PDATE, (G)ET, or (A)LL [U]: `
         : `Edit which querystrings? (C)REATE, (U)PDATE, or (G)ET [U]: `;
-
     const scopeAns = (await askWithDefault(rl, scopePrompt, 'U')).trim().toUpperCase();
     const scope = (allSame && scopeAns.startsWith('A')) ? 'A'
         : scopeAns.startsWith('C') ? 'C'
             : scopeAns.startsWith('G') ? 'G'
                 : 'U';
 
-    // Helper to render a single table (like printQueryStrings does)
-    function printOne(k) {
-        const arr = ent.routes[k].query || [];
-        if (!arr.length) {
-            console.log('(none)');
-            return;
-        }
-        const rows = arr.map((q, i) => [
+    // UI helpers
+    function printOne(label, arr) {
+        const rows = (arr || []).map((q, i) => [
             String(i + 1),
             String(q?.name ?? ''),
             (q && 'column' in q && q.column != null)
                 ? `column:${String(q.column)}`
                 : `value:${String(q?.value ?? '')}`
         ]);
-        printTable(['#', 'Name', 'Mapping'], rows);
+        console.log(`\nQUERYSTRINGS — ${entityKey} / ${label}`);
+        if (rows.length) printTable(['#','Name','Mapping'], rows); else console.log('(none)');
+        console.log('\nCommands:');
+        console.log('<row# | name>      (starts interactive edit for that row)');
+        console.log('[A]DD              (append a new blank row, then prompt for its values)');
+        console.log('[D]EL #|name       (delete that row; asks for confirmation)');
+        console.log('X                  (e[X]it QueryStrings Editor)');
     }
-
-    // CRUD helpers
-    async function addItem(k) {
-        const name = await askInlinePrefilled(rl, 'QueryString Parameter name:', '');
+    function resolveIndexByToken(arr, token) {
+        if (!arr || !arr.length) return -1;
+        const t = String(token ?? '').trim();
+        if (!t) return -1;
+        const maybe = Number(t);
+        if (Number.isInteger(maybe) && maybe >= 1 && maybe <= arr.length) return maybe - 1;
+        const wanted = t.toLowerCase();
+        for (let i = 0; i < arr.length; i++) {
+            const nm = String(arr[i]?.name ?? '').toLowerCase();
+            if (nm === wanted) return i;
+        }
+        return -1;
+    }
+    async function addItem(arr) {
+        const name = await askInlinePrefilled(rl, 'Querystring Parameter name:', '');
         const trimmed = String(name || '').trim();
         if (!trimmed) return;
-        const mapCol = await askYesNo(rl, `Map "${trimmed}" to a schema column?`, false);
-        if (mapCol) {
-            const column = await askInlinePrefilled(rl, 'Column name', '');
-            ent.routes[k].query.push({name: trimmed, column: String(column || '').trim()});
+        const mapToCol = await askYesNo(rl, `Map "${trimmed}" to a schema column?`, false);
+        if (mapToCol) {
+            const column = await askInlinePrefilled(rl, 'Column name:', '');
+            arr.push({ name: trimmed, column: String(column || '').trim() });
         } else {
-            const value = await askInlinePrefilled(rl, 'Static value', '');
-            ent.routes[k].query.push({name: trimmed, value: String(value || '').trim()});
+            const value = await askInlinePrefilled(rl, 'Static value:', '');
+            arr.push({ name: trimmed, value: String(value || '').trim() });
         }
     }
-
-    async function editItem(k) {
-        const arr = ent.routes[k].query || [];
-        if (!arr.length) {
-            console.log('(empty)');
-            return;
-        }
-        const idxRaw = await askInlinePrefilled(rl, 'Row # to edit', '1');
-        const idx = Math.max(1, parseInt(idxRaw, 10)) - 1;
-        if (!(idx in arr)) {
-            console.log('Invalid row.');
-            return;
-        }
+    async function editItemAt(arr, idx) {
         const cur = arr[idx] || {};
-        const name = await askInlinePrefilled(rl, 'QueryString Parameter name:', cur.name || '');
+        const name = await askInlinePrefilled(rl, 'Querystring Parameter name:', cur.name || '');
         const useCol = await askYesNo(rl, `Map "${name}" to a schema column?`, !!cur.column);
         if (useCol) {
-            const column = await askInlinePrefilled(rl, 'Column name', cur.column || '');
-            ent.routes[k].query[idx] = {name, column: String(column || '').trim()};
+            const column = await askInlinePrefilled(rl, 'Column name:', cur.column || '');
+            arr[idx] = { name, column: String(column || '').trim() };
         } else {
-            const value = await askInlinePrefilled(rl, 'Static value', cur.value || '');
-            ent.routes[k].query[idx] = {name, value: String(value || '').trim()};
+            const value = await askInlinePrefilled(rl, 'Static value:', cur.value || '');
+            arr[idx] = { name, value: String(value || '').trim() };
         }
     }
-
-    async function deleteItem(k) {
-        const arr = ent.routes[k].query || [];
-        if (!arr.length) {
-            console.log('(empty)');
-            return;
-        }
-        const idxRaw = await askInlinePrefilled(rl, 'Row # to delete', '1');
-        const idx = Math.max(1, parseInt(idxRaw, 10)) - 1;
-        if (!(idx in arr)) {
-            console.log('Invalid row.');
-            return;
-        }
-        arr.splice(idx, 1);
+    async function deleteItemAt(arr, idx) {
+        const confirm = await askYesNo(rl, `Delete row ${idx + 1}?`, false);
+        if (confirm) arr.splice(idx, 1);
     }
 
-    // Edit session
     if (scope === 'A') {
-        // All-mode: apply every change to C+U+G immediately
+        // Use CREATE as the representative table; mirror to all on each change
+        let all = JSON.parse(JSON.stringify(ent.routes.create.query || []));
+        const applyAll = () => {
+            const cleaned = Array.isArray(all) ? all.filter(q => String(q?.name ?? '').trim()).map(q => {
+                const name = String(q.name).trim();
+                if ('column' in q && q.column != null && String(q.column).trim() !== '') {
+                    return { name, column: String(q.column).trim() };
+                }
+                return { name, value: String(q?.value ?? '').trim() };
+            }) : [];
+            all = cleaned;
+            ent.routes.create.query = JSON.parse(JSON.stringify(cleaned));
+            ent.routes.update.query = JSON.parse(JSON.stringify(cleaned));
+            ent.routes.get.query    = JSON.parse(JSON.stringify(cleaned));
+        };
+        applyAll();
+
         while (true) {
-            console.log(`\nEditing ${entityKey} / QUERYSTRINGS — ALL`);
-            // Show a single canonical table (use CREATE as representative)
-            printOne('create');
-            console.log('[a] add   [e] edit   [d] delete   e[X]it');
-            const cmd = (await askWithDefault(rl, '> ', '')).trim().toUpperCase();
-            if (!cmd) continue;
+            printOne('ALL', all);
+            const line = (await askWithDefault(rl, 'Command (#,A,D,X): ', '')).trim();
+            if (!line) continue;
+            const parts = line.split(/\s+/, 2);
+            const cmd = parts[0].toUpperCase();
+
             if (cmd === 'X' || cmd === 'EXIT') break;
-            if (cmd === 'A') {
-                // add to all three
-                for (const k of ['create', 'update', 'get']) await addItem(k);
+
+            if (cmd === 'A' || cmd === 'ADD') {
+                await addItem(all); applyAll(); continue;
+            }
+            if (cmd === 'D' || cmd === 'DEL') {
+                const idx = resolveIndexByToken(all, parts[1]);
+                if (idx >= 0) { await deleteItemAt(all, idx); applyAll(); }
+                else console.log('Row not found. Use a row number or exact name.');
                 continue;
             }
-            if (cmd === 'E') {
-                for (const k of ['create', 'update', 'get']) await editItem(k);
-                continue;
-            }
-            if (cmd === 'D') {
-                for (const k of ['create', 'update', 'get']) await deleteItem(k);
-                continue;
-            }
-            console.log('Unknown command.');
+
+            const idx = resolveIndexByToken(all, line);
+            if (idx >= 0) { await editItemAt(all, idx); applyAll(); }
+            else console.log('Unknown command. Use <#|name>, A, D <#|name>, or X.');
         }
-    } else {
-        const k = (scope === 'C') ? 'create' : (scope === 'G') ? 'get' : 'update';
-        while (true) {
-            console.log(`\nEditing ${entityKey} / QUERYSTRINGS — ${k.toUpperCase()}`);
-            printOne(k);
-            console.log('[a] add   [e] edit   [d] delete   e[X]it');
-            const cmd = (await askWithDefault(rl, '> ', '')).trim().toUpperCase();
-            if (!cmd) continue;
-            if (cmd === 'X' || cmd === 'EXIT') break;
-            if (cmd === 'A') {
-                await addItem(k);
-                continue;
-            }
-            if (cmd === 'E') {
-                await editItem(k);
-                continue;
-            }
-            if (cmd === 'D') {
-                await deleteItem(k);
-                continue;
-            }
-            console.log('Unknown command.');
+        applyAll();
+        return;
+    }
+
+    const k = (scope === 'C') ? 'create' : (scope === 'G') ? 'get' : 'update';
+    let arr = ent.routes[k].query;
+
+    while (true) {
+        printOne(k.toUpperCase(), arr);
+        const line = (await askWithDefault(rl, 'Command (#,A,D,X)', '')).trim();
+        if (!line) continue;
+        const parts = line.split(/\s+/, 2);
+        const cmd = parts[0].toUpperCase();
+
+        if (cmd === 'X' || cmd === 'EXIT') break;
+
+        if (cmd === 'A' || cmd === 'ADD') {
+            await addItem(arr);
+            arr = arr.filter(q => String(q?.name ?? '').trim());
+            ent.routes[k].query = arr;
+            continue;
+        }
+        if (cmd === 'D' || cmd === 'DEL') {
+            const idx = resolveIndexByToken(arr, parts[1]);
+            if (idx >= 0) { await deleteItemAt(arr, idx); }
+            else console.log('Row not found. Use a row number or exact name.');
+            arr = arr.filter(q => String(q?.name ?? '').trim());
+            ent.routes[k].query = arr;
+            continue;
+        }
+
+        const idx = resolveIndexByToken(arr, line);
+        if (idx >= 0) {
+            await editItemAt(arr, idx);
+            arr = arr.filter(q => String(q?.name ?? '').trim());
+            ent.routes[k].query = arr;
+        } else {
+            console.log('Unknown command. Use <#|name>, A, D <#|name>, or X.');
         }
     }
+
+    ent.routes[k].query = (ent.routes[k].query || []).filter(q => String(q?.name ?? '').trim());
 }
+
 
 /**
  * tableEditor — interactive schema table editor.
@@ -2277,7 +2321,7 @@ Regex help examples:
         console.log('  X                       (eXit Table Editor)');
         console.log("");
 
-        const line = (await askWithDefault(rl, 'Command (#,A,D,B,R,X): ', 'X')).trim();
+        const line = (await askWithDefault(rl, 'Command (#,A,D,B,R,X)', 'X')).trim();
         if (!line) continue;
         if (/^(q|quit|x|exit)$/i.test(line)) return;
 

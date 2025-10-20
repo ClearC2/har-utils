@@ -120,6 +120,67 @@ function prepareQueue(entries) {
     return out;
 }
 
+
+/**
+ * loadRouteConfig — optional route-normalization config (build-har.config.json in CWD)
+ * Keys (optional):
+ *   - stripPrefixes: string[]  (extra leading path prefixes to drop)
+ *   - idSegmentNames: string[] (segment names that precede an id value, e.g., "id","personId")
+ */
+function loadRouteConfig(filename = 'build-har.config.json') {
+    try {
+        const p = path.resolve(process.cwd(), filename);
+        if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
+    } catch {}
+    return null;
+}
+const __routeCfg = loadRouteConfig();
+
+/**
+ * baseRouteOf — normalized base route (no /api assumption; ids -> :id).
+ * Examples:
+ *   /api/v1/person/id/123   -> /person/id/:id
+ *   /rest/orders/abcd1234   -> /orders/:id
+ *   /company/42/users       -> /company/:id/users
+ */
+function baseRouteOf(urlStr) {
+    let pathname = '';
+    try { pathname = new URL(String(urlStr || '')).pathname || ''; }
+    catch { pathname = String(urlStr || ''); }
+
+    // Normalize slashes; remove trailing slash
+    const cleaned = pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '');
+    const rawSegs = cleaned.split('/').filter(Boolean);
+
+    const cfgPrefixes = Array.isArray(__routeCfg && __routeCfg.stripPrefixes) ? __routeCfg.stripPrefixes : [];
+    const dropPrefixes = new Set(['api','rest','service','services','svc', ...cfgPrefixes.map(s => String(s).toLowerCase())]);
+    const isVersion = s => /^v\d+$/i.test(s);
+
+    // Drop one leading cosmetic prefix (api, rest, service, svc) or a version (v1, v2, ...)
+    const segs = rawSegs.filter((s, i) => !(i === 0 && (dropPrefixes.has(String(s).toLowerCase()) || isVersion(s))));
+
+    // ID detectors
+    const isUuidDashed  = s => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+    const isHex24       = s => /^[0-9a-f]{24}$/i.test(s);
+    const isHex32       = s => /^[0-9a-f]{32}$/i.test(s);
+    const isNum         = s => /^\d+$/.test(s);
+    const isIdValue     = s => isNum(s) || isUuidDashed(s) || isHex24(s) || isHex32(s);
+
+    const idNames = Array.isArray(__routeCfg && __routeCfg.idSegmentNames) && __routeCfg.idSegmentNames.length
+        ? __routeCfg.idSegmentNames.map(s => String(s).toLowerCase())
+        : ['id'];
+
+    const out = [];
+    for (let i = 0; i < segs.length; i++) {
+        const s = segs[i];
+        // collapse ".../(id|personId)/<value>" into ".../id/:id"
+        if (i + 1 < segs.length && isIdValue(segs[i + 1]) && idNames.includes(String(s).toLowerCase())) {
+            out.push('id', ':id'); i += 1; continue;
+        }
+        out.push(isIdValue(s) ? ':id' : s);
+    }
+    return '/' + out.join('/');
+}
 /** === Global Stats CSV (header-or-append) === */
 
 const GLOBAL_CSV_COLUMNS = ['timestamp', 'run_title', 'avg_ms', 'min_ms', 'max_ms', 'p50_ms', 'p90_ms', 'p99_ms', 'total_hars', 'inputs', 'threads_per_file', 'max_minutes', 'max_calls_per_thread', 'total_threads_spawned', 'executed_requests', 'exceptions_total', 'c2xx', 'c3xx', 'c4xx', 'c5xx', 'error_status'];
@@ -612,19 +673,17 @@ async function runOneHar(harInfo, threadsPerFile, maxMinutes, maxCallsPerThread,
     let capCalls; // used when call-planned
     let capMs = Number.isFinite(timeCapMs) ? timeCapMs : 0;
 
-    let plannedTotalCalls;
-    const perThreadTargetCalls = Array.from({length: threadsPerFile}, () => (maxCallsPerThread > 0) ? maxCallsPerThread : entryCount);
+// Plan: min(entries, threads × per-thread cap)
+    const perThreadCap = (maxCallsPerThread > 0) ? maxCallsPerThread : entryCount;
+    const plannedTotalCalls = Math.min(entryCount, perThreadCap * threadsPerFile);
 
-    if (maxCallsPerThread > 0) {
-        limiter = (maxMinutes > 0) ? 'time' : 'calls';
-        capCalls = threadsPerFile * maxCallsPerThread;     // progress denominator
-        plannedTotalCalls = capCalls;
-    } else {
-        // 0 = one full pass per thread
-        limiter = (maxMinutes > 0) ? 'time' : 'calls';
-        capCalls = threadsPerFile * entryCount;            // planned calls = threads × entries
-        plannedTotalCalls = capCalls;
-    }
+// Even split across threads
+    const basePerThread = Math.floor(plannedTotalCalls / threadsPerFile);
+    const remainder = plannedTotalCalls % threadsPerFile;
+    const perThreadTargetCalls = Array.from({ length: threadsPerFile }, (_, i) => basePerThread + (i < remainder ? 1 : 0));
+
+    limiter = (maxMinutes > 0) ? 'time' : 'calls';
+    capCalls = plannedTotalCalls;
 
     const zeroClass = () => ({c2: 0, c3: 0, c4: 0, c5: 0, err: 0});
 
@@ -960,10 +1019,33 @@ function printIntro(detected) {
     rl.close();
     console.log('');
 
+
+// --- Base Route Summary (per HAR, method-aware) ---
+    for (const info of harInfos) {
+        const uniqueRoutes = info.baseRouteCounts ? info.baseRouteCounts.size : 0;
+        const lines = info.methodBaseCounts
+            ? Array.from(info.methodBaseCounts.entries()).sort((a,b) => b[1]-a[1]).slice(0, 25)
+            : [];
+        console.log(`Base routes in ${info.path}: ${uniqueRoutes} unique`);
+        if (lines.length) {
+            console.log("  Count  Method Route");
+            for (const [k, cnt] of lines) console.log(`  ${String(cnt).padStart(5)}  ${k}`);
+        } else {
+            console.log("  (none)");
+        }
+        console.log("");
+    }
     const harStates = harInfos.map(h => {
         const entryCount = prepareQueue(h.entries).length;
-        const perThreadTargetCalls = Array.from({length: threadsPerFile}, () => (maxCallsPerThread > 0) ? maxCallsPerThread : entryCount);
-        const plannedCalls = perThreadTargetCalls.reduce((a, b) => a + b, 0);
+
+// Plan: min(entries, threads × per-thread cap)
+        const perThreadCap = (maxCallsPerThread > 0) ? maxCallsPerThread : entryCount;
+        const plannedCalls = Math.min(entryCount, perThreadCap * threadsPerFile);
+
+// Even split across threads
+        const basePerThread = Math.floor(plannedCalls / threadsPerFile);
+        const remainder = plannedCalls % threadsPerFile;
+        const perThreadTargetCalls = Array.from({ length: threadsPerFile }, (_, i) => basePerThread + (i < remainder ? 1 : 0));
         const limiter = (maxMinutes > 0) ? 'time' : 'calls';
         const zeroClass = () => ({c2: 0, c3: 0, c4: 0, c5: 0, err: 0});
         return {

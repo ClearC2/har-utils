@@ -83,26 +83,54 @@ function parseHarEntries(harObj) {
  * @param {Object} entry - HAR entry.
  * @returns {boolean} True if the entry looks like an XHR/fetch call.
  */
+
+
 function isXhrHeuristic(entry) {
-    if (!entry || !entry.request) return false;
-    if (entry._resourceType && String(entry._resourceType).toLowerCase() === 'xhr') return true;
-    const headers = (entry.request.headers || []).reduce((acc, h) => {
-        if (!h || !h.name) return acc;
-        acc[String(h.name).toLowerCase()] = String(h.value ?? '');
-        return acc;
-    }, {});
+    if (!entry) return false;
+
+    const req = entry.request || entry;
+    const url = String(req.url || entry.url || entry.requestUrl || '').trim();
+    if (!url) return false;
+
+    // Normalize headers into a lowercase map
+    const headersArr = req.headers || entry.headers || entry.requestHeaders || [];
+    const headers = {};
+    for (const h of headersArr) {
+        if (!h || h.name == null) continue;
+        const k = String(h.name).toLowerCase();
+        const v = (h.value == null) ? '' : String(h.value);
+        headers[k] = v;
+    }
+
+    // Require http(s) and exclude obvious static assets
+    try {
+        const u = new URL(url);
+        if (!/^https?:$/i.test(u.protocol)) return false;
+        const pathname = u.pathname || '';
+        if (/\.(?:js|mjs|css|png|jpe?g|gif|svg|ico|woff2?|ttf|eot|map|mp4|webm|mov|mpe?g|mp3|wav|ogg|pdf)(\?|$)/i.test(pathname)) {
+            return false;
+        }
+    } catch {
+        return false;
+    }
+
+    // Header-based XHR/fetch hints
     const sfm = headers['sec-fetch-mode'];
     const sfd = headers['sec-fetch-dest'];
     const xrw = headers['x-requested-with'];
     const accept = headers['accept'] || '';
     const ct = headers['content-type'] || '';
+
     if (xrw && xrw.toLowerCase() === 'xmlhttprequest') return true;
     if (sfm && sfm.toLowerCase() === 'cors') return true;
     if (sfd && (sfd.toLowerCase() === 'empty' || sfd.toLowerCase() === 'fetch')) return true;
     if (/application\/json/i.test(accept) || /application\/json/i.test(ct)) return true;
-    return !!(entry._initiator && entry._initiator.type === 'script');
+    if (entry._initiator && entry._initiator.type === 'script') return true;
 
+    // Otherwise include generic HTTP requests (GET/POST/etc.) that weren't filtered as static
+    return true;
 }
+
 
 /**
  * prepareQueue — shuffle HAR entries in fixed-size chunks to balance workload.
@@ -673,6 +701,7 @@ async function runOneHar(harInfo, threadsPerFile, maxMinutes, maxCallsPerThread,
     let capCalls; // used when call-planned
     let capMs = Number.isFinite(timeCapMs) ? timeCapMs : 0;
 
+
 // Plan: min(entries, threads × per-thread cap)
     const perThreadCap = (maxCallsPerThread > 0) ? maxCallsPerThread : entryCount;
     const plannedTotalCalls = Math.min(entryCount, perThreadCap * threadsPerFile);
@@ -907,6 +936,7 @@ function printIntro(detected) {
     const runTitle = await askPrefill('Enter a Run Title (used to label statistics)', '', cfg.run_title || '');
 
     const harList = await selectHarFilesFromCwd(4);
+    console.log('');
 
     let threadsPerFile = await askNumberPrefill(`Threads per file (1–10, default 2; Suggested = ${Math.min(10, Math.max(1, Math.floor((os.cpus()?.length || 4) * 0.75)))} based on cores/CPUs)`, 2, cfg.threads_per_file);
     if (threadsPerFile < 1) threadsPerFile = 2;
@@ -963,16 +993,39 @@ function printIntro(detected) {
         }
 
         const entries = parseHarEntries(obj).filter(isXhrHeuristic);
+
+// Base route census + auth detection (single pass)
+        const baseRouteCounts = new Map();        // base route → count
+        const methodBaseCounts = new Map();       // "METHOD baseRoute" → count
         let hasPopulatedAuth = false;
+
         for (const e of entries) {
-            const hdr = (e.request?.headers || []).find(h => h && String(h.name).toLowerCase() === 'authorization');
-            if (hdr && String(hdr.value).trim()) {
-                hasPopulatedAuth = true;
-                break;
+            // Robust access across shapes returned by parseHarEntries(...)
+            const req     = e.request || e; // sometimes the fields are hoisted
+            const url     = String(req.url || e.url || e.requestUrl || '').trim();
+            const method = (String((req && req.method) || e.method || e.requestMethod || e.httpMethod || '') || 'GET').toUpperCase();
+            const headers = req.headers || e.headers || e.requestHeaders || [];
+
+            if (!url) continue; // nothing to normalize
+
+            const base = baseRouteOf(url);
+
+            // counts
+            baseRouteCounts.set(base, (baseRouteCounts.get(base) || 0) + 1);
+            const mbKey = `${method} ${base}`;
+            methodBaseCounts.set(mbKey, (methodBaseCounts.get(mbKey) || 0) + 1);
+
+            // auth detection (short-circuits once true)
+            if (!hasPopulatedAuth) {
+                const hdr = headers.find(
+                    h => h && String((h.name || '')).toLowerCase() === 'authorization'
+                );
+                if (hdr && String(hdr.value || '').trim()) hasPopulatedAuth = true;
             }
         }
+
         if (!hasPopulatedAuth) allHarsHavePopulatedAuth = false;
-        harInfos.push({path: p, obj, entries, hasPopulatedAuth});
+        harInfos.push({ path: p, obj, entries, hasPopulatedAuth, baseRouteCounts, methodBaseCounts });
     }
 
     let tokenLines = [];
@@ -1020,7 +1073,7 @@ function printIntro(detected) {
     console.log('');
 
 
-// --- Base Route Summary (per HAR, method-aware) ---
+    // --- Base Route Summary (per HAR, method-aware) ---
     for (const info of harInfos) {
         const uniqueRoutes = info.baseRouteCounts ? info.baseRouteCounts.size : 0;
         const lines = info.methodBaseCounts
@@ -1038,11 +1091,11 @@ function printIntro(detected) {
     const harStates = harInfos.map(h => {
         const entryCount = prepareQueue(h.entries).length;
 
-// Plan: min(entries, threads × per-thread cap)
+        // Plan: min(entries, threads × per-thread cap)
         const perThreadCap = (maxCallsPerThread > 0) ? maxCallsPerThread : entryCount;
         const plannedCalls = Math.min(entryCount, perThreadCap * threadsPerFile);
 
-// Even split across threads
+        // Even split across threads
         const basePerThread = Math.floor(plannedCalls / threadsPerFile);
         const remainder = plannedCalls % threadsPerFile;
         const perThreadTargetCalls = Array.from({ length: threadsPerFile }, (_, i) => basePerThread + (i < remainder ? 1 : 0));

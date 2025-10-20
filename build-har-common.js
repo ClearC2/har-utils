@@ -83,13 +83,6 @@ function askInlinePrefilled(rl, label, defValue) {
     });
 }
 
-/** Remove /* *\/ and // comments from a JSONC string so it can be parsed as JSON. */
-function old_stripJsonc(s) {
-    return String(s || "")
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/(^|[^:])\/\/.*$/gm, "$1");
-}
-
 function stripJsonc(raw) {
     return String(raw || "")
         .replace(/\/\*[\s\S]*?\*\//g, ""); // remove /* ... */ block comments only

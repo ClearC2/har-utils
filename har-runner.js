@@ -213,26 +213,6 @@ function baseRouteOf(urlStr) {
 
 const GLOBAL_CSV_COLUMNS = ['timestamp', 'run_title', 'avg_ms', 'min_ms', 'max_ms', 'p50_ms', 'p90_ms', 'p99_ms', 'total_hars', 'inputs', 'threads_per_file', 'max_minutes', 'max_calls_per_thread', 'total_threads_spawned', 'executed_requests', 'exceptions_total', 'c2xx', 'c3xx', 'c4xx', 'c5xx', 'error_status'];
 
-
-/**
- * appendGlobalStatsCsvRow — append a metrics row to the global CSV, writing a header if new.
- *
- * @param {string} csvPath - File path for the global stats CSV.
- * @param {Array<string>} columns - Header columns.
- * @param {Array<any>} values - Values for a new row.
- * @returns {void}
- */
-function appendGlobalStatsCsvRow(csvPath, columns, values) {
-    try {
-        ensureDirForFile(csvPath);
-        const needsHeader = !fs.existsSync(csvPath) || fs.statSync(csvPath).size === 0;
-        if (needsHeader) fs.appendFileSync(csvPath, columns.map(toCsvField).join(',') + '\n', 'utf8');
-        fs.appendFileSync(csvPath, values.map(toCsvField).join(',') + '\n', 'utf8');
-    } catch (e) {
-        console.error('Failed to write global stats CSV:', e && e.message ? e.message : e);
-    }
-}
-
 function sanitizeForCsvHeader(s) {
     return String(s).replace(/[\r\n,]/g, ' ').trim();
 }
@@ -957,19 +937,6 @@ async function runOneHar(harInfo, threadsPerFile, maxMinutes, maxCallsPerThread,
 
     const harSummary = summarizeMetrics(totals);
 
-    // Report per-route averages (method-aware) for this HAR
-    // try {
-    //     const pairs = [];
-    //     for (const [key, agg] of (totals.perRouteAggTimes || new Map()).entries()) {
-    //         if (agg && agg.count > 0) pairs.push([key, Number((agg.totalTime / agg.count).toFixed(2)), agg.count]);
-    //     }
-    //     pairs.sort((a,b)=>a[0].localeCompare(b[0]));
-    //     if (pairs.length) {
-    //         console.log('Per-route average time (ms):');
-    //         for (const [rk, avg, cnt] of pairs) console.log(`  ${rk} : ${avg} (n=${cnt})`);
-    //         console.log('');
-    //     }
-    // } catch {}
     return {
         harSummary,
         exceptionsPath: excWriter.path,
@@ -1015,6 +982,93 @@ function printIntro(detected) {
     console.log(line('authTokens.txt', false, detected.authTokens, '— Authorization tokens to use for each call. If multiple, one is randomly chosen for each call.'));
     console.log(line('server_jwt.txt', false, detected.jwt, '— HS256 secret used to auto refresh JWT expirations (optional).'));
     console.log('────────────────────────────────────────────────────────────────────────\n');
+}
+
+
+/**
+ * writeGlobalStatsCsv — appends one run’s stats to the global CSV,
+ * adding new route-average columns (METHOD + base route) at the end if needed.
+ *
+ * Column naming: route_avg_ms::<METHOD> <base-route>
+ *   - Commas/newlines are removed by sanitizeForCsvHeader.
+ *   - Ordering is alphabetical by column header for deterministic CSV structure.
+ *
+ * @param {Object} args
+ *  - outputCsv, runTitle, harList, threadsPerFile, maxMinutes, maxCallsPerThread
+ *  - harInfos (for inputs list)
+ *  - global (merged metrics accumulator with perRouteAggTimes)
+ *  - globalSum (summarizeMetrics(global))
+ */
+function writeGlobalStatsCsv(args) {
+    const {
+        outputCsv,
+        runTitle,
+        harList,
+        threadsPerFile,
+        maxMinutes,
+        maxCallsPerThread,
+        harInfos,
+        global,
+        globalSum
+    } = args;
+
+    // ---- 1) Base row values matching GLOBAL_CSV_COLUMNS ----
+    const inputs = (harInfos || []).map(h => path.basename(h.path)).join(',');
+    const totalHars = Array.isArray(harList) ? harList.length : 0;
+    const totalThreads = (threadsPerFile || 0) * (totalHars || 0);
+
+    // Tally status classes
+    const counts = (globalSum && globalSum.statusCounts) || (global && global.statusCounts) || {};
+    let c2 = 0, c3 = 0, c4 = 0, c5 = 0, err = 0;
+    for (const [k, v] of Object.entries(counts)) {
+        const n = Number(k);
+        if (!Number.isFinite(n)) { if (k === 'ERROR') err += v; continue; }
+        if (n >= 200 && n < 300) c2 += v;
+        else if (n >= 300 && n < 400) c3 += v;
+        else if (n >= 400 && n < 500) c4 += v;
+        else if (n >= 500 && n < 600) c5 += v;
+    }
+
+    const baseRow = buildGlobalCsvRow({
+        timestamp: localTsYmdHms(),
+        runTitle,
+        avgMs: Number(globalSum.avgMs || 0),
+        minMs: Number(globalSum.minMs || 0),
+        maxMs: Number(globalSum.maxMs || 0),
+        p50: Number(globalSum.p50 || 0),
+        p90: Number(globalSum.p90 || 0),
+        p99: Number(globalSum.p99 || 0),
+        totalHars,
+        inputs,
+        threadsPerFile,
+        maxMinutes,
+        maxCallsPerThread,
+        totalThreadsSpawned: totalThreads,
+        executedRequests: Number(globalSum.totalRequests || 0),
+        exceptionsTotal: Number(globalSum.exceptions || (global && global.exceptions) || 0),
+        c2xx: c2, c3xx: c3, c4xx: c4, c5xx: c5, err
+    });
+
+    // ---- 2) Dynamic route-average columns (METHOD + base route) ----
+    const routeAvgMap = new Map();
+    if (global && global.perRouteAggTimes && global.perRouteAggTimes.size) {
+        for (const [routeKey, agg] of global.perRouteAggTimes.entries()) {
+            if (!agg || !agg.count) continue;
+            const avg = agg.totalTime / agg.count;
+            const header = sanitizeForCsvHeader(`route_avg_ms::${routeKey}`);
+            routeAvgMap.set(header, Number(avg.toFixed(2)));
+        }
+    }
+
+    const dynamicHeaders = Array.from(routeAvgMap.keys()).sort((a,b)=>a.localeCompare(b));
+    const dynamicValues  = dynamicHeaders.map(h => routeAvgMap.get(h));
+
+    // ---- 3) Upgrade header if needed, then append row ----
+    const finalColumns = GLOBAL_CSV_COLUMNS.concat(dynamicHeaders);
+    ensureCsvHeaderColumns(outputCsv, finalColumns);
+    appendCsvRowWithHeader(outputCsv, finalColumns, baseRow.concat(dynamicValues));
+
+    console.log(`\n[ok] Global statistics written → ${outputCsv}`);
 }
 
 // ---------- main ----------
@@ -1263,102 +1317,44 @@ function printIntro(detected) {
     }
 
     printSummaryBlock('=== Global Total ===', globalSum, [], null);
+
     // Global per-route average time (ms)
     try {
-        const pairsG = [];
-        for (const [key, agg] of (global.perRouteAggTimes || new Map()).entries()) {
-            if (agg && agg.count > 0) {
-                pairsG.push([key, Number((agg.totalTime / agg.count).toFixed(2)), agg.count]);
-            }
+        console.log('\nPer-route average time (ms) — global:');
+
+        const pairsG = Array.from(global.perRouteAggTimes.entries())
+            .map(([key, agg]) => [key, (agg.totalTime / agg.count).toFixed(2)])
+            .sort((a, b) => a[0].localeCompare(b[0]));
+
+        // compute padding widths
+        const maxMethod = Math.max(...pairsG.map(([k]) => k.split(' ')[0].length));
+        const maxRoute = Math.max(...pairsG.map(([k]) => k.split(' ').slice(1).join(' ').length));
+
+        for (const [k, v] of pairsG) {
+            const [method, ...routeParts] = k.split(' ');
+            const route = routeParts.join(' ');
+            console.log(
+                `${method.padEnd(maxMethod + 1)} ${route.padEnd(maxRoute + 2)} : ${v} ms`
+            );
         }
-        pairsG.sort((a, b) => a[0].localeCompare(b[0]));
-        if (pairsG.length) {
-            console.log('Per-route average time (ms) — global:');
-            for (const [rk, avg] of pairsG) {
-                console.log(`  ${rk} : ${avg}`);
-            }
-            console.log('');
-        }
+        console.log('');
     } catch (err) {
         console.warn('Error printing global per-route averages:', err);
     }
 
     // === Write GLOBAL stats CSV row ===
     try {
-        const counts = (globalSum && (globalSum.statusCounts || global.statusCounts)) || {};
-        const c2 = (counts['2xx'] || counts[200] || 0);
-        const c3 = (counts['3xx'] || counts[300] || 0);
-        const c4 = (counts['4xx'] || counts[400] || 0);
-        const c5 = (counts['5xx'] || counts[500] || 0);
-        const err = (counts['ERROR'] || counts['error'] || 0);
-        const totalHars = (Array.isArray(harList) ? harList.length : (Array.isArray(cfg.har_files) ? cfg.har_files.length : 0));
-        const totalThreads = (threadsPerFile || 0) * (totalHars || 0);
-        const inputs = harInfos.map(h => path.basename(h.path)).join(',');
-        const row = buildGlobalCsvRow({
-            timestamp: localTsYmdHms(),
+        writeGlobalStatsCsv({
+            outputCsv,
             runTitle,
-            avgMs: globalSum.avgMs || 0,
-            minMs: globalSum.minMs || 0,
-            maxMs: globalSum.maxMs || 0,
-            p50: globalSum.p50 || 0,
-            p90: globalSum.p90 || 0,
-            p99: globalSum.p99 || 0,
-            totalHars,
-            inputs,
+            harList,
             threadsPerFile,
             maxMinutes,
             maxCallsPerThread,
-            totalThreadsSpawned: totalThreads,
-            executedRequests: globalSum.totalRequests || 0,
-            exceptionsTotal: globalSum.exceptions || global.exceptions || 0,
-            c2xx: c2,
-            c3xx: c3,
-            c4xx: c4,
-            c5xx: c5,
-            err
+            harInfos,
+            global,
+            globalSum
         });
-        // -------------- Per-route averages → dynamic CSV columns --------------
-        /** Build route averages from merged global totals */
-        const routeAvgsMap = new Map();
-        if (global.perRouteAggTimes && global.perRouteAggTimes.size) {
-            for (const [key, agg] of global.perRouteAggTimes.entries()) {
-                if (agg && agg.count > 0) {
-                    routeAvgsMap.set(key, Number((agg.totalTime / agg.count).toFixed(2)));
-                }
-            }
-        }
-
-        /** Stable order for columns: sort by route key */
-        const sortedRouteKeys = Array.from(routeAvgsMap.keys()).sort((a,b)=>a.localeCompare(b));
-
-        /** Make column headers for each route avg (at the END of the CSV) */
-        const routeAvgHeaders = sortedRouteKeys.map(k =>
-            sanitizeForCsvHeader(`route_avg_ms::${k}`)  // e.g., route_avg_ms::GET /person/id/:id
-        );
-
-        /** Base columns and base row (existing behavior) */
-        const baseColumns = GLOBAL_CSV_COLUMNS.slice();  // keep your existing schema intact
-        const baseRow     = buildGlobalCsvRow({
-            timestamp, runTitle, avgMs, minMs, maxMs, p50Ms, p90Ms, p99Ms,
-            totalHars: harInfos.length, inputs, threadsPerFile, maxMinutes,
-            maxCallsPerThread, totalThreadsSpawned, executedRequests: globalSum.count,
-            exceptionsTotal: global.exceptions, c2xx: clazz['2xx']||0, c3xx: clazz['3xx']||0,
-            c4xx: clazz['4xx']||0, c5xx: clazz['5xx']||0, err: errorStatus
-        });
-
-        /** Stitch final columns + values */
-        const finalColumns = baseColumns.concat(routeAvgHeaders);
-        const routeAvgValues = sortedRouteKeys.map(k => routeAvgsMap.get(k));
-        const finalRow = baseRow.concat(routeAvgValues);
-
-        /** If the file already exists but is missing any of the new route columns, upgrade header & pad rows */
-        ensureCsvHeaderColumns(outputCsv, finalColumns);
-
-        /** Append the row (writes header automatically if file is new) */
-        appendCsvRowWithHeader(outputCsv, finalColumns, finalRow);
-        // ----------------------------------------------------------------------
-
-        console.log(`\nStatistics written to: ${outputCsv}`);
     } catch (e) {
         console.error('Global CSV write failed:', e && e.message ? e.message : e);
     }

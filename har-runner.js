@@ -83,26 +83,54 @@ function parseHarEntries(harObj) {
  * @param {Object} entry - HAR entry.
  * @returns {boolean} True if the entry looks like an XHR/fetch call.
  */
+
+
 function isXhrHeuristic(entry) {
-    if (!entry || !entry.request) return false;
-    if (entry._resourceType && String(entry._resourceType).toLowerCase() === 'xhr') return true;
-    const headers = (entry.request.headers || []).reduce((acc, h) => {
-        if (!h || !h.name) return acc;
-        acc[String(h.name).toLowerCase()] = String(h.value ?? '');
-        return acc;
-    }, {});
+    if (!entry) return false;
+
+    const req = entry.request || entry;
+    const url = String(req.url || entry.url || entry.requestUrl || '').trim();
+    if (!url) return false;
+
+    // Normalize headers into a lowercase map
+    const headersArr = req.headers || entry.headers || entry.requestHeaders || [];
+    const headers = {};
+    for (const h of headersArr) {
+        if (!h || h.name == null) continue;
+        const k = String(h.name).toLowerCase();
+        const v = (h.value == null) ? '' : String(h.value);
+        headers[k] = v;
+    }
+
+    // Require http(s) and exclude obvious static assets
+    try {
+        const u = new URL(url);
+        if (!/^https?:$/i.test(u.protocol)) return false;
+        const pathname = u.pathname || '';
+        if (/\.(?:js|mjs|css|png|jpe?g|gif|svg|ico|woff2?|ttf|eot|map|mp4|webm|mov|mpe?g|mp3|wav|ogg|pdf)(\?|$)/i.test(pathname)) {
+            return false;
+        }
+    } catch {
+        return false;
+    }
+
+    // Header-based XHR/fetch hints
     const sfm = headers['sec-fetch-mode'];
     const sfd = headers['sec-fetch-dest'];
     const xrw = headers['x-requested-with'];
     const accept = headers['accept'] || '';
     const ct = headers['content-type'] || '';
+
     if (xrw && xrw.toLowerCase() === 'xmlhttprequest') return true;
     if (sfm && sfm.toLowerCase() === 'cors') return true;
     if (sfd && (sfd.toLowerCase() === 'empty' || sfd.toLowerCase() === 'fetch')) return true;
     if (/application\/json/i.test(accept) || /application\/json/i.test(ct)) return true;
-    return !!(entry._initiator && entry._initiator.type === 'script');
+    if (entry._initiator && entry._initiator.type === 'script') return true;
 
+    // Otherwise include generic HTTP requests (GET/POST/etc.) that weren't filtered as static
+    return true;
 }
+
 
 /**
  * prepareQueue — shuffle HAR entries in fixed-size chunks to balance workload.
@@ -120,28 +148,120 @@ function prepareQueue(entries) {
     return out;
 }
 
+
+/**
+ * loadRouteConfig — optional route-normalization config (build-har.config.json in CWD)
+ * Keys (optional):
+ *   - stripPrefixes: string[]  (extra leading path prefixes to drop)
+ *   - idSegmentNames: string[] (segment names that precede an id value, e.g., "id","personId")
+ */
+function loadRouteConfig(filename = 'build-har.config.json') {
+    try {
+        const p = path.resolve(process.cwd(), filename);
+        if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
+    } catch {}
+    return null;
+}
+const __routeCfg = loadRouteConfig();
+
+/**
+ * baseRouteOf — normalized base route (no /api assumption; ids -> :id).
+ * Examples:
+ *   /api/v1/person/id/123   -> /person/id/:id
+ *   /rest/orders/abcd1234   -> /orders/:id
+ *   /company/42/users       -> /company/:id/users
+ */
+function baseRouteOf(urlStr) {
+    let pathname = '';
+    try { pathname = new URL(String(urlStr || '')).pathname || ''; }
+    catch { pathname = String(urlStr || ''); }
+
+    // Normalize slashes; remove trailing slash
+    const cleaned = pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '');
+    const rawSegs = cleaned.split('/').filter(Boolean);
+
+    const cfgPrefixes = Array.isArray(__routeCfg && __routeCfg.stripPrefixes) ? __routeCfg.stripPrefixes : [];
+    const dropPrefixes = new Set(['api','rest','service','services','svc', ...cfgPrefixes.map(s => String(s).toLowerCase())]);
+    const isVersion = s => /^v\d+$/i.test(s);
+
+    // Drop one leading cosmetic prefix (api, rest, service, svc) or a version (v1, v2, ...)
+    const segs = rawSegs.filter((s, i) => !(i === 0 && (dropPrefixes.has(String(s).toLowerCase()) || isVersion(s))));
+
+    // ID detectors
+    const isUuidDashed  = s => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+    const isHex24       = s => /^[0-9a-f]{24}$/i.test(s);
+    const isHex32       = s => /^[0-9a-f]{32}$/i.test(s);
+    const isNum         = s => /^\d+$/.test(s);
+    const isIdValue     = s => isNum(s) || isUuidDashed(s) || isHex24(s) || isHex32(s);
+
+    const idNames = Array.isArray(__routeCfg && __routeCfg.idSegmentNames) && __routeCfg.idSegmentNames.length
+        ? __routeCfg.idSegmentNames.map(s => String(s).toLowerCase())
+        : ['id'];
+
+    const out = [];
+    for (let i = 0; i < segs.length; i++) {
+        const s = segs[i];
+        // collapse ".../(id|personId)/<value>" into ".../id/:id"
+        if (i + 1 < segs.length && isIdValue(segs[i + 1]) && idNames.includes(String(s).toLowerCase())) {
+            out.push('id', ':id'); i += 1; continue;
+        }
+        out.push(isIdValue(s) ? ':id' : s);
+    }
+    return '/' + out.join('/');
+}
 /** === Global Stats CSV (header-or-append) === */
 
 const GLOBAL_CSV_COLUMNS = ['timestamp', 'run_title', 'avg_ms', 'min_ms', 'max_ms', 'p50_ms', 'p90_ms', 'p99_ms', 'total_hars', 'inputs', 'threads_per_file', 'max_minutes', 'max_calls_per_thread', 'total_threads_spawned', 'executed_requests', 'exceptions_total', 'c2xx', 'c3xx', 'c4xx', 'c5xx', 'error_status'];
 
+function sanitizeForCsvHeader(s) {
+    return String(s).replace(/[\r\n,]/g, ' ').trim();
+}
+
+/** very simple CSV split for header lines we control */
+function splitCsvSimple(line) {
+    return line.replace(/\r?\n$/, '').split(',');
+}
 
 /**
- * appendGlobalStatsCsvRow — append a metrics row to the global CSV, writing a header if new.
- *
- * @param {string} csvPath - File path for the global stats CSV.
- * @param {Array<string>} columns - Header columns.
- * @param {Array<any>} values - Values for a new row.
- * @returns {void}
+ * ensureCsvHeaderColumns — if the CSV exists and is missing columns,
+ * rewrite the file with an upgraded header and pad old rows with empties.
  */
-function appendGlobalStatsCsvRow(csvPath, columns, values) {
-    try {
-        ensureDirForFile(csvPath);
-        const needsHeader = !fs.existsSync(csvPath) || fs.statSync(csvPath).size === 0;
-        if (needsHeader) fs.appendFileSync(csvPath, columns.map(toCsvField).join(',') + '\n', 'utf8');
-        fs.appendFileSync(csvPath, values.map(toCsvField).join(',') + '\n', 'utf8');
-    } catch (e) {
-        console.error('Failed to write global stats CSV:', e && e.message ? e.message : e);
+function ensureCsvHeaderColumns(csvPath, desiredColumns) {
+    const p = path.resolve(process.cwd(), csvPath);
+    if (!fs.existsSync(p)) return; // nothing to upgrade — new file will be created later
+
+    const raw = fs.readFileSync(p, 'utf8');
+    const lines = raw.split(/\r?\n/);
+    if (!lines.length || !lines[0].trim()) return; // weird, but treat as new
+
+    const currentCols = splitCsvSimple(lines[0]);
+    // If columns already match (same order and length), do nothing
+    if (currentCols.length === desiredColumns.length &&
+        currentCols.every((c, i) => c === desiredColumns[i])) return;
+
+    // Upgrade: rewrite header and pad each existing row with extra commas
+    const delta = Math.max(0, desiredColumns.length - currentCols.length);
+    const upgraded = [desiredColumns.join(',')];
+    for (let i = 1; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) continue; // skip trailing blank
+        const padded = line + (delta ? (',' + Array(delta).fill('').join(',')) : '');
+        upgraded.push(padded);
     }
+    fs.writeFileSync(p, upgraded.join('\n') + '\n', 'utf8');
+}
+
+/**
+ * appendCsvRowWithHeader — writes header if file is new/empty, then appends row.
+ */
+function appendCsvRowWithHeader(csvPath, columns, rowValues) {
+    const p = path.resolve(process.cwd(), csvPath);
+    const exists = fs.existsSync(p);
+    if (!exists || !fs.readFileSync(p, 'utf8').trim()) {
+        // new file or empty → write header first
+        fs.writeFileSync(p, columns.join(',') + '\n', 'utf8');
+    }
+    fs.appendFileSync(p, rowValues.map(v => (v ?? '')).join(',') + '\n', 'utf8');
 }
 
 
@@ -255,7 +375,14 @@ function openExceptionWriterFor(harPath) {
  */
 function newMetrics() {
     return {
-        totalTime: 0, timings: [], statusCounts: {}, methodCounts: {}, exceptions: 0, perUrlAgg: new Map()
+        totalTime: 0,
+        timings: [],
+        statusCounts: {},
+        methodCounts: {},
+        exceptions: 0,
+        perUrlAgg: new Map(),
+        // add this:
+        perRouteAggTimes: new Map() // key: "METHOD /base/route" -> { count, totalTime }
     };
 }
 
@@ -268,6 +395,7 @@ function newMetrics() {
  * @param {number|string} status - HTTP status or "ERROR".
  * @param {number} timeMs - Elapsed time.
  */
+
 function recordTiming(m, url, method, status, timeMs) {
     m.timings.push(timeMs);
     m.totalTime += timeMs;
@@ -284,7 +412,19 @@ function recordTiming(m, url, method, status, timeMs) {
     g.count += 1;
     g.totalTime += timeMs;
     if (timeMs > g.maxTime) g.maxTime = timeMs;
+
+    // Aggregate per base route (method-aware)
+    try {
+        const base = baseRouteOf(url);
+        if (m.perRouteAggTimes == null) m.perRouteAggTimes = new Map();
+        const routeKey = `${meth} ${base}`;
+        let rt = m.perRouteAggTimes.get(routeKey);
+        if (!rt) { rt = { count: 0, totalTime: 0 }; m.perRouteAggTimes.set(routeKey, rt); }
+        rt.count += 1;
+        rt.totalTime += timeMs;
+    } catch {}
 }
+
 
 
 /**
@@ -612,19 +752,18 @@ async function runOneHar(harInfo, threadsPerFile, maxMinutes, maxCallsPerThread,
     let capCalls; // used when call-planned
     let capMs = Number.isFinite(timeCapMs) ? timeCapMs : 0;
 
-    let plannedTotalCalls;
-    const perThreadTargetCalls = Array.from({length: threadsPerFile}, () => (maxCallsPerThread > 0) ? maxCallsPerThread : entryCount);
 
-    if (maxCallsPerThread > 0) {
-        limiter = (maxMinutes > 0) ? 'time' : 'calls';
-        capCalls = threadsPerFile * maxCallsPerThread;     // progress denominator
-        plannedTotalCalls = capCalls;
-    } else {
-        // 0 = one full pass per thread
-        limiter = (maxMinutes > 0) ? 'time' : 'calls';
-        capCalls = threadsPerFile * entryCount;            // planned calls = threads × entries
-        plannedTotalCalls = capCalls;
-    }
+// Plan: min(entries, threads × per-thread cap)
+    const perThreadCap = (maxCallsPerThread > 0) ? maxCallsPerThread : entryCount;
+    const plannedTotalCalls = Math.min(entryCount, perThreadCap * threadsPerFile);
+
+// Even split across threads
+    const basePerThread = Math.floor(plannedTotalCalls / threadsPerFile);
+    const remainder = plannedTotalCalls % threadsPerFile;
+    const perThreadTargetCalls = Array.from({ length: threadsPerFile }, (_, i) => basePerThread + (i < remainder ? 1 : 0));
+
+    limiter = (maxMinutes > 0) ? 'time' : 'calls';
+    capCalls = plannedTotalCalls;
 
     const zeroClass = () => ({c2: 0, c3: 0, c4: 0, c5: 0, err: 0});
 
@@ -786,9 +925,18 @@ async function runOneHar(harInfo, threadsPerFile, maxMinutes, maxCallsPerThread,
         totals.methodCounts = mergeCounts(totals.methodCounts, m.methodCounts);
         totals.exceptions += m.exceptions;
         mergePerUrl(totals.perUrlAgg, m.perUrlAgg);
+
+        // merge perRouteAggTimes (method-aware base routes)
+        if (!totals.perRouteAggTimes) totals.perRouteAggTimes = new Map();
+        for (const [k, v] of (m.perRouteAggTimes || new Map()).entries()) {
+            const tgt = totals.perRouteAggTimes.get(k);
+            if (!tgt) totals.perRouteAggTimes.set(k, { count: v.count, totalTime: v.totalTime });
+            else { tgt.count += v.count; tgt.totalTime += v.totalTime; }
+        }
     }
 
     const harSummary = summarizeMetrics(totals);
+
     return {
         harSummary,
         exceptionsPath: excWriter.path,
@@ -836,6 +984,93 @@ function printIntro(detected) {
     console.log('────────────────────────────────────────────────────────────────────────\n');
 }
 
+
+/**
+ * writeGlobalStatsCsv — appends one run’s stats to the global CSV,
+ * adding new route-average columns (METHOD + base route) at the end if needed.
+ *
+ * Column naming: route_avg_ms::<METHOD> <base-route>
+ *   - Commas/newlines are removed by sanitizeForCsvHeader.
+ *   - Ordering is alphabetical by column header for deterministic CSV structure.
+ *
+ * @param {Object} args
+ *  - outputCsv, runTitle, harList, threadsPerFile, maxMinutes, maxCallsPerThread
+ *  - harInfos (for inputs list)
+ *  - global (merged metrics accumulator with perRouteAggTimes)
+ *  - globalSum (summarizeMetrics(global))
+ */
+function writeGlobalStatsCsv(args) {
+    const {
+        outputCsv,
+        runTitle,
+        harList,
+        threadsPerFile,
+        maxMinutes,
+        maxCallsPerThread,
+        harInfos,
+        global,
+        globalSum
+    } = args;
+
+    // ---- 1) Base row values matching GLOBAL_CSV_COLUMNS ----
+    const inputs = (harInfos || []).map(h => path.basename(h.path)).join(',');
+    const totalHars = Array.isArray(harList) ? harList.length : 0;
+    const totalThreads = (threadsPerFile || 0) * (totalHars || 0);
+
+    // Tally status classes
+    const counts = (globalSum && globalSum.statusCounts) || (global && global.statusCounts) || {};
+    let c2 = 0, c3 = 0, c4 = 0, c5 = 0, err = 0;
+    for (const [k, v] of Object.entries(counts)) {
+        const n = Number(k);
+        if (!Number.isFinite(n)) { if (k === 'ERROR') err += v; continue; }
+        if (n >= 200 && n < 300) c2 += v;
+        else if (n >= 300 && n < 400) c3 += v;
+        else if (n >= 400 && n < 500) c4 += v;
+        else if (n >= 500 && n < 600) c5 += v;
+    }
+
+    const baseRow = buildGlobalCsvRow({
+        timestamp: localTsYmdHms(),
+        runTitle,
+        avgMs: Number(globalSum.avgMs || 0),
+        minMs: Number(globalSum.minMs || 0),
+        maxMs: Number(globalSum.maxMs || 0),
+        p50: Number(globalSum.p50 || 0),
+        p90: Number(globalSum.p90 || 0),
+        p99: Number(globalSum.p99 || 0),
+        totalHars,
+        inputs,
+        threadsPerFile,
+        maxMinutes,
+        maxCallsPerThread,
+        totalThreadsSpawned: totalThreads,
+        executedRequests: Number(globalSum.totalRequests || 0),
+        exceptionsTotal: Number(globalSum.exceptions || (global && global.exceptions) || 0),
+        c2xx: c2, c3xx: c3, c4xx: c4, c5xx: c5, err
+    });
+
+    // ---- 2) Dynamic route-average columns (METHOD + base route) ----
+    const routeAvgMap = new Map();
+    if (global && global.perRouteAggTimes && global.perRouteAggTimes.size) {
+        for (const [routeKey, agg] of global.perRouteAggTimes.entries()) {
+            if (!agg || !agg.count) continue;
+            const avg = agg.totalTime / agg.count;
+            const header = sanitizeForCsvHeader(`route_avg_ms::${routeKey}`);
+            routeAvgMap.set(header, Number(avg.toFixed(2)));
+        }
+    }
+
+    const dynamicHeaders = Array.from(routeAvgMap.keys()).sort((a,b)=>a.localeCompare(b));
+    const dynamicValues  = dynamicHeaders.map(h => routeAvgMap.get(h));
+
+    // ---- 3) Upgrade header if needed, then append row ----
+    const finalColumns = GLOBAL_CSV_COLUMNS.concat(dynamicHeaders);
+    ensureCsvHeaderColumns(outputCsv, finalColumns);
+    appendCsvRowWithHeader(outputCsv, finalColumns, baseRow.concat(dynamicValues));
+
+    console.log(`\n[ok] Global statistics written → ${outputCsv}`);
+}
+
 // ---------- main ----------
 (async function main() {
     const cfg = loadConfig();
@@ -848,6 +1083,7 @@ function printIntro(detected) {
     const runTitle = await askPrefill('Enter a Run Title (used to label statistics)', '', cfg.run_title || '');
 
     const harList = await selectHarFilesFromCwd(4);
+    console.log('');
 
     let threadsPerFile = await askNumberPrefill(`Threads per file (1–10, default 2; Suggested = ${Math.min(10, Math.max(1, Math.floor((os.cpus()?.length || 4) * 0.75)))} based on cores/CPUs)`, 2, cfg.threads_per_file);
     if (threadsPerFile < 1) threadsPerFile = 2;
@@ -904,16 +1140,39 @@ function printIntro(detected) {
         }
 
         const entries = parseHarEntries(obj).filter(isXhrHeuristic);
+
+// Base route census + auth detection (single pass)
+        const baseRouteCounts = new Map();        // base route → count
+        const methodBaseCounts = new Map();       // "METHOD baseRoute" → count
         let hasPopulatedAuth = false;
+
         for (const e of entries) {
-            const hdr = (e.request?.headers || []).find(h => h && String(h.name).toLowerCase() === 'authorization');
-            if (hdr && String(hdr.value).trim()) {
-                hasPopulatedAuth = true;
-                break;
+            // Robust access across shapes returned by parseHarEntries(...)
+            const req     = e.request || e; // sometimes the fields are hoisted
+            const url     = String(req.url || e.url || e.requestUrl || '').trim();
+            const method = (String((req && req.method) || e.method || e.requestMethod || e.httpMethod || '') || 'GET').toUpperCase();
+            const headers = req.headers || e.headers || e.requestHeaders || [];
+
+            if (!url) continue; // nothing to normalize
+
+            const base = baseRouteOf(url);
+
+            // counts
+            baseRouteCounts.set(base, (baseRouteCounts.get(base) || 0) + 1);
+            const mbKey = `${method} ${base}`;
+            methodBaseCounts.set(mbKey, (methodBaseCounts.get(mbKey) || 0) + 1);
+
+            // auth detection (short-circuits once true)
+            if (!hasPopulatedAuth) {
+                const hdr = headers.find(
+                    h => h && String((h.name || '')).toLowerCase() === 'authorization'
+                );
+                if (hdr && String(hdr.value || '').trim()) hasPopulatedAuth = true;
             }
         }
+
         if (!hasPopulatedAuth) allHarsHavePopulatedAuth = false;
-        harInfos.push({path: p, obj, entries, hasPopulatedAuth});
+        harInfos.push({ path: p, obj, entries, hasPopulatedAuth, baseRouteCounts, methodBaseCounts });
     }
 
     let tokenLines = [];
@@ -960,10 +1219,33 @@ function printIntro(detected) {
     rl.close();
     console.log('');
 
+
+    // --- Base Route Summary (per HAR, method-aware) ---
+    for (const info of harInfos) {
+        const uniqueRoutes = info.methodBaseCounts ? info.methodBaseCounts.size : 0;
+        const lines = info.methodBaseCounts
+            ? Array.from(info.methodBaseCounts.entries()).sort((a,b) => b[1]-a[1]).slice(0, 25)
+            : [];
+        console.log(`Base routes in ${info.path}: ${uniqueRoutes} unique`);
+        if (lines.length) {
+            console.log("  Count  Method Route");
+            for (const [k, cnt] of lines) console.log(`  ${String(cnt).padStart(5)}  ${k}`);
+        } else {
+            console.log("  (none)");
+        }
+        console.log("");
+    }
     const harStates = harInfos.map(h => {
         const entryCount = prepareQueue(h.entries).length;
-        const perThreadTargetCalls = Array.from({length: threadsPerFile}, () => (maxCallsPerThread > 0) ? maxCallsPerThread : entryCount);
-        const plannedCalls = perThreadTargetCalls.reduce((a, b) => a + b, 0);
+
+        // Plan: min(entries, threads × per-thread cap)
+        const perThreadCap = (maxCallsPerThread > 0) ? maxCallsPerThread : entryCount;
+        const plannedCalls = Math.min(entryCount, perThreadCap * threadsPerFile);
+
+        // Even split across threads
+        const basePerThread = Math.floor(plannedCalls / threadsPerFile);
+        const remainder = plannedCalls % threadsPerFile;
+        const perThreadTargetCalls = Array.from({ length: threadsPerFile }, (_, i) => basePerThread + (i < remainder ? 1 : 0));
         const limiter = (maxMinutes > 0) ? 'time' : 'calls';
         const zeroClass = () => ({c2: 0, c3: 0, c4: 0, c5: 0, err: 0});
         return {
@@ -1006,6 +1288,14 @@ function printIntro(detected) {
         global.methodCounts = mergeCounts(global.methodCounts, res.totals.methodCounts);
         global.exceptions += res.totals.exceptions;
         mergePerUrl(global.perUrlAgg, res.totals.perUrlAgg);
+
+        // merge perRouteAggTimes across HARs
+        if (!global.perRouteAggTimes) global.perRouteAggTimes = new Map();
+        for (const [k, v] of (res.totals.perRouteAggTimes || new Map()).entries()) {
+            const tgt = global.perRouteAggTimes.get(k);
+            if (!tgt) global.perRouteAggTimes.set(k, { count: v.count, totalTime: v.totalTime });
+            else { tgt.count += v.count; tgt.totalTime += v.totalTime; }
+        }
     }
     const globalSum = summarizeMetrics(global);
 
@@ -1022,47 +1312,49 @@ function printIntro(detected) {
 
         const lines = [`Runtime (ms)     : ${res.elapsedAll}`, `Total entries    : ${res.totalEntries}`, callsLine, `Exceptions file  : ${res.exceptionsPath}`];
         printSummaryBlock(header, res.harSummary, lines, null);
+
         if (trackTopTables) printTopTables(`Top Tables for ${info.path}`, res.totals);
     }
 
     printSummaryBlock('=== Global Total ===', globalSum, [], null);
 
+    // Global per-route average time (ms)
+    try {
+        console.log('\nPer-route average time (ms) — global:');
+
+        const pairsG = Array.from(global.perRouteAggTimes.entries())
+            .map(([key, agg]) => [key, (agg.totalTime / agg.count).toFixed(2)])
+            .sort((a, b) => a[0].localeCompare(b[0]));
+
+        // compute padding widths
+        const maxMethod = Math.max(...pairsG.map(([k]) => k.split(' ')[0].length));
+        const maxRoute = Math.max(...pairsG.map(([k]) => k.split(' ').slice(1).join(' ').length));
+
+        for (const [k, v] of pairsG) {
+            const [method, ...routeParts] = k.split(' ');
+            const route = routeParts.join(' ');
+            console.log(
+                `${method.padEnd(maxMethod + 1)} ${route.padEnd(maxRoute + 2)} : ${v} ms`
+            );
+        }
+        console.log('');
+    } catch (err) {
+        console.warn('Error printing global per-route averages:', err);
+    }
+
     // === Write GLOBAL stats CSV row ===
     try {
-        const counts = (globalSum && (globalSum.statusCounts || global.statusCounts)) || {};
-        const c2 = (counts['2xx'] || counts[200] || 0);
-        const c3 = (counts['3xx'] || counts[300] || 0);
-        const c4 = (counts['4xx'] || counts[400] || 0);
-        const c5 = (counts['5xx'] || counts[500] || 0);
-        const err = (counts['ERROR'] || counts['error'] || 0);
-        const totalHars = (Array.isArray(harList) ? harList.length : (Array.isArray(cfg.har_files) ? cfg.har_files.length : 0));
-        const totalThreads = (threadsPerFile || 0) * (totalHars || 0);
-        const inputs = harInfos.map(h => path.basename(h.path)).join(',');
-        const row = buildGlobalCsvRow({
-            timestamp: localTsYmdHms(),
+        writeGlobalStatsCsv({
+            outputCsv,
             runTitle,
-            avgMs: globalSum.avgMs || 0,
-            minMs: globalSum.minMs || 0,
-            maxMs: globalSum.maxMs || 0,
-            p50: globalSum.p50 || 0,
-            p90: globalSum.p90 || 0,
-            p99: globalSum.p99 || 0,
-            totalHars,
-            inputs,
+            harList,
             threadsPerFile,
             maxMinutes,
             maxCallsPerThread,
-            totalThreadsSpawned: totalThreads,
-            executedRequests: globalSum.totalRequests || 0,
-            exceptionsTotal: globalSum.exceptions || global.exceptions || 0,
-            c2xx: c2,
-            c3xx: c3,
-            c4xx: c4,
-            c5xx: c5,
-            err
+            harInfos,
+            global,
+            globalSum
         });
-        appendGlobalStatsCsvRow(outputCsv, GLOBAL_CSV_COLUMNS, row);
-        console.log(`\nStatistics written to: ${outputCsv}`);
     } catch (e) {
         console.error('Global CSV write failed:', e && e.message ? e.message : e);
     }

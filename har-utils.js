@@ -36,12 +36,12 @@ async function runOnce(script) {
         console.log('  (C) Config Builder  — scan SQL + HAR to define API↔SQL mappings.');
         console.log('  (G) HAR Generator   — generate synthetic HAR traffic from config.');
         console.log('  (R) HAR Runner      — execute HARs, measure API performance.');
-        console.log('  (Q) Quit.\n');
+        console.log('  (X) eXit.\n');
 
-        const mode = (await askWithDefault(rl, 'Enter mode (C/G/R/Q)', 'R')).trim().toUpperCase();
+        const mode = (await askWithDefault(rl, 'Enter mode (C/G/R/X)', 'R')).trim().toUpperCase();
         rl.close();
 
-        if (mode === 'Q') {
+        if (mode === 'X') {
             console.log('Goodbye.');
             process.exit(0);
         }

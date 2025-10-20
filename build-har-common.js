@@ -83,11 +83,9 @@ function askInlinePrefilled(rl, label, defValue) {
     });
 }
 
-/** Remove /* *\/ and // comments from a JSONC string so it can be parsed as JSON. */
-function stripJsonc(s) {
-    return String(s || "")
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/(^|[^:])\/\/.*$/gm, "$1");
+function stripJsonc(raw) {
+    return String(raw || "")
+        .replace(/\/\*[\s\S]*?\*\//g, ""); // remove /* ... */ block comments only
 }
 /** Load a JSONC file, strip comments, parse to object, or return the fallback on failure. */
 function loadJsonc(filepath, fallback = {}) {

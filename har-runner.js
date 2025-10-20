@@ -233,6 +233,57 @@ function appendGlobalStatsCsvRow(csvPath, columns, values) {
     }
 }
 
+function sanitizeForCsvHeader(s) {
+    return String(s).replace(/[\r\n,]/g, ' ').trim();
+}
+
+/** very simple CSV split for header lines we control */
+function splitCsvSimple(line) {
+    return line.replace(/\r?\n$/, '').split(',');
+}
+
+/**
+ * ensureCsvHeaderColumns — if the CSV exists and is missing columns,
+ * rewrite the file with an upgraded header and pad old rows with empties.
+ */
+function ensureCsvHeaderColumns(csvPath, desiredColumns) {
+    const p = path.resolve(process.cwd(), csvPath);
+    if (!fs.existsSync(p)) return; // nothing to upgrade — new file will be created later
+
+    const raw = fs.readFileSync(p, 'utf8');
+    const lines = raw.split(/\r?\n/);
+    if (!lines.length || !lines[0].trim()) return; // weird, but treat as new
+
+    const currentCols = splitCsvSimple(lines[0]);
+    // If columns already match (same order and length), do nothing
+    if (currentCols.length === desiredColumns.length &&
+        currentCols.every((c, i) => c === desiredColumns[i])) return;
+
+    // Upgrade: rewrite header and pad each existing row with extra commas
+    const delta = Math.max(0, desiredColumns.length - currentCols.length);
+    const upgraded = [desiredColumns.join(',')];
+    for (let i = 1; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) continue; // skip trailing blank
+        const padded = line + (delta ? (',' + Array(delta).fill('').join(',')) : '');
+        upgraded.push(padded);
+    }
+    fs.writeFileSync(p, upgraded.join('\n') + '\n', 'utf8');
+}
+
+/**
+ * appendCsvRowWithHeader — writes header if file is new/empty, then appends row.
+ */
+function appendCsvRowWithHeader(csvPath, columns, rowValues) {
+    const p = path.resolve(process.cwd(), csvPath);
+    const exists = fs.existsSync(p);
+    if (!exists || !fs.readFileSync(p, 'utf8').trim()) {
+        // new file or empty → write header first
+        fs.writeFileSync(p, columns.join(',') + '\n', 'utf8');
+    }
+    fs.appendFileSync(p, rowValues.map(v => (v ?? '')).join(',') + '\n', 'utf8');
+}
+
 
 /**
  * buildGlobalCsvRow — construct a metrics row matching GLOBAL_CSV_COLUMNS.
@@ -344,7 +395,14 @@ function openExceptionWriterFor(harPath) {
  */
 function newMetrics() {
     return {
-        totalTime: 0, timings: [], statusCounts: {}, methodCounts: {}, exceptions: 0, perUrlAgg: new Map()
+        totalTime: 0,
+        timings: [],
+        statusCounts: {},
+        methodCounts: {},
+        exceptions: 0,
+        perUrlAgg: new Map(),
+        // add this:
+        perRouteAggTimes: new Map() // key: "METHOD /base/route" -> { count, totalTime }
     };
 }
 
@@ -357,6 +415,7 @@ function newMetrics() {
  * @param {number|string} status - HTTP status or "ERROR".
  * @param {number} timeMs - Elapsed time.
  */
+
 function recordTiming(m, url, method, status, timeMs) {
     m.timings.push(timeMs);
     m.totalTime += timeMs;
@@ -373,7 +432,19 @@ function recordTiming(m, url, method, status, timeMs) {
     g.count += 1;
     g.totalTime += timeMs;
     if (timeMs > g.maxTime) g.maxTime = timeMs;
+
+    // Aggregate per base route (method-aware)
+    try {
+        const base = baseRouteOf(url);
+        if (m.perRouteAggTimes == null) m.perRouteAggTimes = new Map();
+        const routeKey = `${meth} ${base}`;
+        let rt = m.perRouteAggTimes.get(routeKey);
+        if (!rt) { rt = { count: 0, totalTime: 0 }; m.perRouteAggTimes.set(routeKey, rt); }
+        rt.count += 1;
+        rt.totalTime += timeMs;
+    } catch {}
 }
+
 
 
 /**
@@ -874,9 +945,31 @@ async function runOneHar(harInfo, threadsPerFile, maxMinutes, maxCallsPerThread,
         totals.methodCounts = mergeCounts(totals.methodCounts, m.methodCounts);
         totals.exceptions += m.exceptions;
         mergePerUrl(totals.perUrlAgg, m.perUrlAgg);
+
+        // merge perRouteAggTimes (method-aware base routes)
+        if (!totals.perRouteAggTimes) totals.perRouteAggTimes = new Map();
+        for (const [k, v] of (m.perRouteAggTimes || new Map()).entries()) {
+            const tgt = totals.perRouteAggTimes.get(k);
+            if (!tgt) totals.perRouteAggTimes.set(k, { count: v.count, totalTime: v.totalTime });
+            else { tgt.count += v.count; tgt.totalTime += v.totalTime; }
+        }
     }
 
     const harSummary = summarizeMetrics(totals);
+
+    // Report per-route averages (method-aware) for this HAR
+    // try {
+    //     const pairs = [];
+    //     for (const [key, agg] of (totals.perRouteAggTimes || new Map()).entries()) {
+    //         if (agg && agg.count > 0) pairs.push([key, Number((agg.totalTime / agg.count).toFixed(2)), agg.count]);
+    //     }
+    //     pairs.sort((a,b)=>a[0].localeCompare(b[0]));
+    //     if (pairs.length) {
+    //         console.log('Per-route average time (ms):');
+    //         for (const [rk, avg, cnt] of pairs) console.log(`  ${rk} : ${avg} (n=${cnt})`);
+    //         console.log('');
+    //     }
+    // } catch {}
     return {
         harSummary,
         exceptionsPath: excWriter.path,
@@ -1075,7 +1168,7 @@ function printIntro(detected) {
 
     // --- Base Route Summary (per HAR, method-aware) ---
     for (const info of harInfos) {
-        const uniqueRoutes = info.baseRouteCounts ? info.baseRouteCounts.size : 0;
+        const uniqueRoutes = info.methodBaseCounts ? info.methodBaseCounts.size : 0;
         const lines = info.methodBaseCounts
             ? Array.from(info.methodBaseCounts.entries()).sort((a,b) => b[1]-a[1]).slice(0, 25)
             : [];
@@ -1141,6 +1234,14 @@ function printIntro(detected) {
         global.methodCounts = mergeCounts(global.methodCounts, res.totals.methodCounts);
         global.exceptions += res.totals.exceptions;
         mergePerUrl(global.perUrlAgg, res.totals.perUrlAgg);
+
+        // merge perRouteAggTimes across HARs
+        if (!global.perRouteAggTimes) global.perRouteAggTimes = new Map();
+        for (const [k, v] of (res.totals.perRouteAggTimes || new Map()).entries()) {
+            const tgt = global.perRouteAggTimes.get(k);
+            if (!tgt) global.perRouteAggTimes.set(k, { count: v.count, totalTime: v.totalTime });
+            else { tgt.count += v.count; tgt.totalTime += v.totalTime; }
+        }
     }
     const globalSum = summarizeMetrics(global);
 
@@ -1157,10 +1258,30 @@ function printIntro(detected) {
 
         const lines = [`Runtime (ms)     : ${res.elapsedAll}`, `Total entries    : ${res.totalEntries}`, callsLine, `Exceptions file  : ${res.exceptionsPath}`];
         printSummaryBlock(header, res.harSummary, lines, null);
+
         if (trackTopTables) printTopTables(`Top Tables for ${info.path}`, res.totals);
     }
 
     printSummaryBlock('=== Global Total ===', globalSum, [], null);
+    // Global per-route average time (ms)
+    try {
+        const pairsG = [];
+        for (const [key, agg] of (global.perRouteAggTimes || new Map()).entries()) {
+            if (agg && agg.count > 0) {
+                pairsG.push([key, Number((agg.totalTime / agg.count).toFixed(2)), agg.count]);
+            }
+        }
+        pairsG.sort((a, b) => a[0].localeCompare(b[0]));
+        if (pairsG.length) {
+            console.log('Per-route average time (ms) — global:');
+            for (const [rk, avg] of pairsG) {
+                console.log(`  ${rk} : ${avg}`);
+            }
+            console.log('');
+        }
+    } catch (err) {
+        console.warn('Error printing global per-route averages:', err);
+    }
 
     // === Write GLOBAL stats CSV row ===
     try {
@@ -1196,7 +1317,47 @@ function printIntro(detected) {
             c5xx: c5,
             err
         });
-        appendGlobalStatsCsvRow(outputCsv, GLOBAL_CSV_COLUMNS, row);
+        // -------------- Per-route averages → dynamic CSV columns --------------
+        /** Build route averages from merged global totals */
+        const routeAvgsMap = new Map();
+        if (global.perRouteAggTimes && global.perRouteAggTimes.size) {
+            for (const [key, agg] of global.perRouteAggTimes.entries()) {
+                if (agg && agg.count > 0) {
+                    routeAvgsMap.set(key, Number((agg.totalTime / agg.count).toFixed(2)));
+                }
+            }
+        }
+
+        /** Stable order for columns: sort by route key */
+        const sortedRouteKeys = Array.from(routeAvgsMap.keys()).sort((a,b)=>a.localeCompare(b));
+
+        /** Make column headers for each route avg (at the END of the CSV) */
+        const routeAvgHeaders = sortedRouteKeys.map(k =>
+            sanitizeForCsvHeader(`route_avg_ms::${k}`)  // e.g., route_avg_ms::GET /person/id/:id
+        );
+
+        /** Base columns and base row (existing behavior) */
+        const baseColumns = GLOBAL_CSV_COLUMNS.slice();  // keep your existing schema intact
+        const baseRow     = buildGlobalCsvRow({
+            timestamp, runTitle, avgMs, minMs, maxMs, p50Ms, p90Ms, p99Ms,
+            totalHars: harInfos.length, inputs, threadsPerFile, maxMinutes,
+            maxCallsPerThread, totalThreadsSpawned, executedRequests: globalSum.count,
+            exceptionsTotal: global.exceptions, c2xx: clazz['2xx']||0, c3xx: clazz['3xx']||0,
+            c4xx: clazz['4xx']||0, c5xx: clazz['5xx']||0, err: errorStatus
+        });
+
+        /** Stitch final columns + values */
+        const finalColumns = baseColumns.concat(routeAvgHeaders);
+        const routeAvgValues = sortedRouteKeys.map(k => routeAvgsMap.get(k));
+        const finalRow = baseRow.concat(routeAvgValues);
+
+        /** If the file already exists but is missing any of the new route columns, upgrade header & pad rows */
+        ensureCsvHeaderColumns(outputCsv, finalColumns);
+
+        /** Append the row (writes header automatically if file is new) */
+        appendCsvRowWithHeader(outputCsv, finalColumns, finalRow);
+        // ----------------------------------------------------------------------
+
         console.log(`\nStatistics written to: ${outputCsv}`);
     } catch (e) {
         console.error('Global CSV write failed:', e && e.message ? e.message : e);

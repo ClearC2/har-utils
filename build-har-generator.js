@@ -7,7 +7,10 @@
 "use strict";
 
 const fs = require("fs");
+const path = require("path");
+
 const {
+    // request/url helpers
     joinUrl,
     shuffleInPlace,
     chooseByPercent,
@@ -16,13 +19,12 @@ const {
     coerceAndNormalizeForChangelog,
     sqlLiteral,
     simpleEntityName,
-    clampDecimal19_6
-} = require('./build-har-common');
-const path = require("path");
+    clampDecimal19_6,
 
-const {
+    // I/O / config / prompts
     ask,
     askInlinePrefilled,
+    askWithDefault,
     CONFIG_PATH,
     loadJsonc,
     saveJsonc,
@@ -495,30 +497,46 @@ function buildBodyForSide({side, schema, csvRow, csvHeadersLower, fillPercent}) 
 /**
  * buildHarEntry — construct a minimal HAR entry from method/url/body.
  *
- * @param {{method:string, url:string, body:Object}} args - Request components.
- * @returns {Object} HAR entry object (log.entries[] element).
+ * For GET requests, no Content-Type header and no postData are included.
+ *
+ * @param {{method:string, url:string, body?:Object}} args
+ * @returns {Object} HAR entry
  */
 function buildHarEntry({method, url, body}) {
+    const m = String(method || "").toUpperCase();
+    const isGet = (m === "GET");
+
+    const req = {
+        method: m,
+        url,
+        httpVersion: "HTTP/1.1",
+        cookies: [],
+        headers: [],
+        queryString: []
+    };
+
+    if (!isGet) {
+        req.headers.push({ name: "content-type", value: "application/json" });
+        req.postData = { mimeType: "application/json", text: JSON.stringify(body || {}) };
+    }
+
     return {
-        startedDateTime: new Date().toISOString(), time: 0, request: {
-            method,
-            url,
-            httpVersion: "HTTP/1.1",
-            cookies: [],
-            headers: [{name: "content-type", value: "application/json"}],
-            queryString: [],
-            postData: {mimeType: "application/json", text: JSON.stringify(body)},
-        }, response: {
+        startedDateTime: new Date().toISOString(),
+        time: 0,
+        request: req,
+        response: {
             status: 0,
             statusText: "",
             httpVersion: "HTTP/1.1",
             cookies: [],
             headers: [],
-            content: {size: 0, mimeType: "application/json"},
+            content: { size: 0, mimeType: "application/json" },
             redirectURL: "",
             headersSize: -1,
-            bodySize: -1,
-        }, cache: {}, timings: {send: 0, wait: 0, receive: 0},
+            bodySize: -1
+        },
+        cache: {},
+        timings: { send: 0, wait: 0, receive: 0 }
     };
 }
 
@@ -634,6 +652,171 @@ function applyRouteParam(updatePath, idCol, idVal) {
 }
 
 /**
+ * configureExistingSourceUX — interactive setup for choosing a CSV and reuse policy.
+ *
+ * @param {string} entityKey
+ * @param {Object} entity
+ * @param {Object} bits
+ * @param {number} n
+ * @param {"update"|"get"} mode
+ * @returns {Promise<void>}
+ */
+async function configureExistingSourceUX(entityKey, entity, bits, n, mode) {
+    const isGet = mode === "get";
+    while (true) {
+        const prefill = isGet
+            ? (entity?.getSource?.csvPath) || (entity?.updateSource?.csvPath) || (entity?.existingDataPath) || ""
+            : (entity?.updateSource?.csvPath) || (entity?.existingDataPath) || "";
+
+        const label = `Filename of Existing data for ${entityKey}${isGet ? " (GET)" : ""}, or H for Help:`;
+        const v = (await askInlinePrefilled(null, label, prefill)).trim();
+
+        if (/^(h|help)$/i.test(v)) {
+            console.log("\nRun this SQL to select existing data, then export or copy it (with headers) to a .csv file:\n");
+            console.log(buildTopIdsSql(entityKey, entity, n));
+            console.log("");
+            continue;
+        }
+
+        if (!v) { console.log("✖ Please enter a filename, or H for Help."); continue; }
+        if (!fs.existsSync(v)) { console.log("✖ File not found. Try again, or H for Help."); continue; }
+
+        const raw = fs.readFileSync(v, "utf8");
+        const firstLine = (raw.split(/\r?\n/).find(Boolean) || "");
+        const delim = firstLine.includes("\t") ? "\t" : ",";
+        const headers = firstLine.split(delim).map(h => String(h || "").trim()).filter(Boolean);
+        if (!headers.length) { console.log("✖ Could not detect headers in that file."); continue; }
+
+        const chosenHeader = headers.includes(bits.idCol) ? bits.idCol : headers[0];
+        console.log(`Detected column: ${chosenHeader}`);
+
+        let reusePolicy = "random-with-reuse";
+        while (true) {
+            console.log("\nKey selection method [1-4, default=4]:");
+            console.log("  1) sequential-no-reuse");
+            console.log("  2) sequential-with-reuse");
+            console.log("  3) random-no-reuse");
+            console.log("  4) random-with-reuse");
+            console.log("");
+
+            const choice = (await askInlinePrefilled(null, "Choose [default=4]:", "4")).trim();
+            const c = choice === "" ? "4" : choice;
+            if (["1", "2", "3", "4"].includes(c)) {
+                reusePolicy =
+                    c === "1" ? "sequential-no-reuse" :
+                        c === "2" ? "sequential-with-reuse" :
+                            c === "3" ? "random-no-reuse" :
+                                "random-with-reuse";
+                break;
+            }
+            console.log("✖ Enter 1, 2, 3, or 4.");
+        }
+
+        const csvPath = v;
+        const src = { csvPath, fields: [chosenHeader], reusePolicy };
+
+        if (isGet) {
+            entity.getSource = src;
+        } else {
+            entity.updateSource = src;
+            entity.existingDataPath = csvPath;
+        }
+
+        const cfgNow = loadJsonc(CONFIG_PATH, null);
+        if (cfgNow && cfgNow.entities && cfgNow.entities[entityKey]) {
+            cfgNow.entities[entityKey][isGet ? "getSource" : "updateSource"] = src;
+            if (!isGet) cfgNow.entities[entityKey].existingDataPath = csvPath;
+            saveJsonc(CONFIG_PATH, cfgNow);
+        }
+
+        console.log(`\nSaved ${isGet ? "GET" : "update"} source:`);
+        console.log(`  Path: ${csvPath}`);
+        console.log(`  Policy: ${reusePolicy}\n`);
+        return;
+    }
+}
+
+/**
+ * configureGetSourceUX — interactive setup for choosing a GET CSV and policy.
+ * Detects header column, chooses reuse policy, and persists metadata to the config.
+ *
+ * @param {string} entityKey
+ * @param {Object} entity
+ * @param {Object} bits
+ * @param {number} nGet
+ * @returns {Promise<void>}
+ */
+/*
+async function configureGetSourceUX(entityKey, entity, bits, nGet) {
+    while (true) {
+        const prefill =
+            (entity?.getSource?.csvPath) ||
+            (entity?.updateSource?.csvPath) ||
+            (entity?.existingDataPath) || "";
+        const v = (await askInlinePrefilled(null, `Filename of Existing data for ${entityKey} (GET), or H for Help:`, prefill)).trim();
+
+        if (/^(h|help)$/i.test(v)) {
+            console.log("\nRun this SQL to select existing data, then export or copy it (with headers) to a .csv file:\n");
+            console.log(buildTopIdsSql(entityKey, entity, nGet));
+            console.log("");
+            continue;
+        }
+
+        if (!v) {
+            console.log("✖ Please enter a filename, or H for Help.");
+            continue;
+        }
+        if (!fs.existsSync(v)) {
+            console.log("✖ File not found. Try again, or H for Help.");
+            continue;
+        }
+
+        const raw = fs.readFileSync(v, "utf8");
+        const firstLine = (raw.split(/\r?\n/).find(Boolean) || "");
+        const delim = firstLine.includes("\t") ? "\t" : ",";
+        const headers = firstLine.split(delim).map(h => String(h || "").trim()).filter(Boolean);
+        if (!headers.length) {
+            console.log("✖ Could not detect headers in that file.");
+            continue;
+        }
+
+        const chosenHeader = headers.includes(bits.idCol) ? bits.idCol : headers[0];
+        console.log(`Detected column: ${chosenHeader}`);
+
+        console.log("\nKey selection method [1-4, default=4]:");
+        console.log("  1) sequential-no-reuse   – top to bottom once");
+        console.log("  2) sequential-with-reuse – loop file endlessly");
+        console.log("  3) random-no-reuse       – random order, no repeats");
+        console.log("  4) random-with-reuse     – random order, repeats allowed");
+        console.log("");
+
+        const choice = (await askInlinePrefilled(null, "Choose [default=4]:", "4")).trim();
+        const reuseMap = {
+            "1": "sequential-no-reuse",
+            "2": "sequential-with-reuse",
+            "3": "random-no-reuse",
+            "4": "random-with-reuse",
+        };
+        const reusePolicy = reuseMap[choice || "4"];
+
+        const csvPath = v;
+        entity.getSource = { csvPath, fields: [chosenHeader], reusePolicy };
+
+        const cfgNow = loadJsonc(CONFIG_PATH, null);
+        if (cfgNow && cfgNow.entities && cfgNow.entities[entityKey]) {
+            cfgNow.entities[entityKey].getSource = entity.getSource;
+            // keep existingDataPath untouched here; updateSource remains separate
+            saveJsonc(CONFIG_PATH, cfgNow);
+        }
+
+        console.log("\nSaved GET source:");
+        console.log(`  Path: ${csvPath}`);
+        console.log(`  Policy: ${reusePolicy}\n`);
+        return;
+    }
+}
+*/
+/**
  * configureUpdateSourceUX — interactive setup for choosing an update CSV and policy.
  * Detects header column, chooses reuse policy, persists minimal metadata to the config.
  *
@@ -643,6 +826,8 @@ function applyRouteParam(updatePath, idCol, idVal) {
  * @param {number} nUpdate - Number of UPDATE calls requested (for context/help).
  * @returns {Promise<void>}
  */
+
+/*
 async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
     while (true) {
         const v = (await askInlinePrefilled(null, `Filename of Existing data for ${entityKey}, or H for Help:`, entity?.updateSource?.csvPath || entity?.existingDataPath || "")).trim();
@@ -710,10 +895,11 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
         return;
     }
 }
+*/
 
 /**
  * main — interactive HAR generator entry point (IIFE).
- * Queues per-entity CREATE/UPDATE entries, prompts for output path, shuffles, and writes a single HAR.
+ * Queues per-entity CREATE/UPDATE/GET entries, prompts for output path, shuffles, and writes a single HAR.
  *
  * @returns {Promise<void>}
  */
@@ -725,25 +911,19 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
     if (!entityKeys.length) die("No entities in config.");
 
     const allEntries = [];
-    const perEntityTotals = new Map(); // entity -> { creates, updates }
+    const perEntityTotals = new Map(); // entity -> { creates, updates, gets }
 
     while (true) {
         console.log("Entities:");
         entityKeys.forEach((k, i) => console.log(`  ${i + 1}. ${k}`));
 
-        // Show queued summary line each time we return to the main menu
         const queuedParts = [];
         let totalCalls = 0;
         for (const [ekey, totals] of perEntityTotals.entries()) {
             const name = simpleEntityName(ekey);
-            if (totals.creates > 0) {
-                queuedParts.push(`${totals.creates} ${name} ${pluralUpper(totals.creates, "Create", "Creates")}`);
-                totalCalls += totals.creates;
-            }
-            if (totals.updates > 0) {
-                queuedParts.push(`${totals.updates} ${name} ${pluralUpper(totals.updates, "Update", "Updates")}`);
-                totalCalls += totals.updates;
-            }
+            if (totals.creates > 0) { queuedParts.push(`${totals.creates} ${name} ${pluralUpper(totals.creates, "Create", "Creates")}`); totalCalls += totals.creates; }
+            if (totals.updates > 0) { queuedParts.push(`${totals.updates} ${name} ${pluralUpper(totals.updates, "Update", "Updates")}`); totalCalls += totals.updates; }
+            if (totals.gets > 0)    { queuedParts.push(`${totals.gets} ${name} GET${totals.gets === 1 ? "" : "s"}`); totalCalls += totals.gets; }
         }
         if (queuedParts.length) {
             console.log("");
@@ -754,7 +934,7 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
         console.log("");
 
         const sel = (await ask("Entity number or name, G to Generate HAR and exit, Q to quit: ")).trim();
-        if (/^(g)$/i.test(sel)) break; // exit loop → write once
+        if (/^(g)$/i.test(sel)) break;
         if (/^(q)$/i.test(sel)) return 0;
 
         let entityKey = null;
@@ -765,11 +945,7 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
             const canon = canonicalEntityKey(cfg, sel);
             if (canon) entityKey = canon;
         }
-
-        if (!entityKey) {
-            console.log("✖ Invalid selection. Try again.\n");
-            continue;
-        }
+        if (!entityKey) { console.log("✖ Invalid selection. Try again.\n"); continue; }
         console.log(`Selected: ${entityKey}`);
 
         const entity = cfg.entities[entityKey];
@@ -777,7 +953,6 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
         const schema = entity.schema || [];
 
         console.log("");
-        // NEW: per-entity fill % (sticky defaults; first-run default 50)
         const priorCreatePct = Number(entity?.fill?.createPercent);
         const priorUpdatePct = Number(entity?.fill?.updatePercent);
         const defCreatePctStr = Number.isFinite(priorCreatePct) ? String(priorCreatePct) : "50";
@@ -800,23 +975,33 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
             updatePercent = Math.max(0, Math.min(100, Number(v) || 0));
         }
 
-        // Persist fill% immediately so they become defaults next time
         entity.fill = entity.fill || {};
         entity.fill.createPercent = createPercent;
         entity.fill.updatePercent = updatePercent;
-        const cfgNow = loadJsonc(CONFIG_PATH, null);
-        if (cfgNow && cfgNow.entities && cfgNow.entities[entityKey]) {
-            cfgNow.entities[entityKey].fill = {createPercent, updatePercent};
-            saveJsonc(CONFIG_PATH, cfgNow);
+        {
+            const cfgNow = loadJsonc(CONFIG_PATH, null);
+            if (cfgNow && cfgNow.entities && cfgNow.entities[entityKey]) {
+                cfgNow.entities[entityKey].fill = { createPercent, updatePercent };
+                saveJsonc(CONFIG_PATH, cfgNow);
+            }
         }
 
-        let pickKey = null;
+        // UPDATE source (always prompt when nUpdate > 0; path prefilled from prior value if present)
+        let pickUpdateKey = null;
         if (nUpdate > 0) {
-            await configureUpdateSourceUX(entityKey, entity, bits, nUpdate);
-            pickKey = createExistingKeyPicker(entity.updateSource);
+            await configureExistingSourceUX(entityKey, entity, bits, nUpdate, "update");
+            pickUpdateKey = createExistingKeyPicker(entity.updateSource);
         }
 
-        // CREATE
+        // GET count and source (prefill GET path from prior getSource or last used updateSource)
+        const nGet = await askNumberInlineNoDefault(`How many GET calls for ${entityKey}?`, 0);
+
+        let pickGetKey = null;
+        if (nGet > 0) {
+            await configureExistingSourceUX(entityKey, entity, bits, nGet, "get");
+            pickGetKey = createExistingKeyPicker(entity.getSource);
+        }
+
         for (let i = 0; i < nCreate; i++) {
             const body = buildBodyForSide({
                 side: "create",
@@ -825,14 +1010,13 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
                 csvHeadersLower: null,
                 fillPercent: createPercent
             });
-            const shaped = shapePayload({side: "create", entity, body});
+            const shaped = shapePayload({ side: "create", entity, body });
             const url = joinUrl(bits.host, bits.createPath);
-            allEntries.push(buildHarEntry({method: bits.createMethod, url, body: shaped}));
+            allEntries.push(buildHarEntry({ method: bits.createMethod, url, body: shaped }));
         }
 
-        // UPDATE
         for (let i = 0; i < nUpdate; i++) {
-            const keyObj = pickKey ? pickKey() : {};
+            const keyObj = pickUpdateKey ? pickUpdateKey() : {};
             const idVal = keyObj[bits.idCol] ?? Object.values(keyObj)[0];
             if (!idVal) die(`No "${bits.idCol}" value present in selected key row.`);
 
@@ -844,67 +1028,105 @@ async function configureUpdateSourceUX(entityKey, entity, bits, nUpdate) {
                 csvHeadersLower,
                 fillPercent: updatePercent
             });
-            const shaped = shapePayload({side: "update", entity, body});
-
-            const updatePathApplied = applyRouteParam(bits.updatePath, bits.idCol, idVal);
-            const url = joinUrl(bits.host, updatePathApplied);
-            allEntries.push(buildHarEntry({method: bits.updateMethod, url, body: shaped}));
+            const shaped = shapePayload({ side: "update", entity, body });
+            const pathWithId = applyRouteParam(bits.updatePath, bits.idCol, idVal);
+            const url = joinUrl(bits.host, pathWithId);
+            allEntries.push(buildHarEntry({ method: bits.updateMethod, url, body: shaped }));
         }
 
-        const prev = perEntityTotals.get(entityKey) || {creates: 0, updates: 0};
+        if (nGet > 0) {
+            const getRoute = entity?.routes?.get || null;
+            const getMethod = String(getRoute?.method || "GET").toUpperCase();
+            const getPathTemplate = getRoute?.path || bits.updatePath;
+            const getIdCol = (getRoute?.params && getRoute.params[0] && getRoute.params[0].column)
+                ? getRoute.params[0].column
+                : bits.idCol;
+
+            for (let i = 0; i < nGet; i++) {
+                const keyObj = pickGetKey ? pickGetKey() : {};
+                const idVal = keyObj[getIdCol] ?? keyObj[bits.idCol] ?? Object.values(keyObj)[0];
+                if (!idVal) die(`No "${getIdCol}" value present in selected key row.`);
+
+                const pathWithId = applyRouteParam(getPathTemplate, getIdCol, idVal);
+                const url = joinUrl(bits.host, pathWithId);
+
+                const entry = buildHarEntry({ method: getMethod, url });
+                if (Array.isArray(getRoute?.query) && getRoute.query.length > 0) {
+                    entry.request.queryString = getRoute.query
+                        .filter(q => q && typeof q.name === "string")
+                        .map(q => ({ name: String(q.name), value: String(q.value ?? "") }));
+                }
+                allEntries.push(entry);
+            }
+        }
+
+        const prev = perEntityTotals.get(entityKey) || { creates: 0, updates: 0, gets: 0 };
         prev.creates += nCreate;
         prev.updates += nUpdate;
+        prev.gets += nGet;
         perEntityTotals.set(entityKey, prev);
 
-        console.log(`\nQueued ${nCreate} ${pluralUpper(nCreate, "CREATE", "CREATES")} and ` + `${nUpdate} ${pluralUpper(nUpdate, "UPDATE", "UPDATES")} for ${entityKey}.\n`);
+        console.log("");
     }
 
-    // If nothing queued, just exit quietly.
-    if (!allEntries.length) return;
-
-    // Summary
-    console.log("Summary:");
-    for (const [ekey, totals] of perEntityTotals.entries()) {
-        const total = totals.creates + totals.updates;
-        console.log(`  ${ekey} — ${total} calls (` + `${totals.creates} ${pluralUpper(totals.creates, "CREATE", "CREATES")} / ` + `${totals.updates} ${pluralUpper(totals.updates, "UPDATE", "UPDATES")})`);
+    if (!allEntries.length) {
+        console.log("No entries to write.\n");
+        return 0;
     }
-    console.log(`Total queued: ${allEntries.length} ${entryWord(allEntries.length)}\n`);
 
-    // Inline filename prompt with last-used prefill (editable); keep **relative** path as typed
+    console.log("");
+    console.log(`Queued total: ${allEntries.length} ${entryWord(allEntries.length)}`);
+
+    // Inline filename prompt with last-used prefill (editable)
     const cfg2 = loadJsonc(CONFIG_PATH, null) || {};
-    const suggested = cfg2.lastUsedHarPath || uniqueDatedFilename("generated", ".har");
+    const suggested = cfg2.lastUsedHarPath || uniqueDatedFilename("har-generator-output", ".har");
     let outPath;
+
     while (true) {
-        const raw = await askInlinePrefilled(null, `Output HAR filename [last: ${suggested}]: `, suggested);
+        const raw = await askInlinePrefilled(
+            null,
+            `Output HAR filename [last: ${suggested}]: `,
+            suggested
+        );
         const p = String(raw || "").trim() || suggested;
 
         if (fs.existsSync(p)) {
-            // Non-prefilled overwrite prompt, default = N (user must explicitly type Y)
-            const owRaw = await askInlinePrefilled(null, `File "${p}" exists. Overwrite? (y/N): `, "");
+            const owRaw = await askInlinePrefilled(
+                null,
+                `File "${p}" exists. Overwrite? (y/N): `,
+                ""
+            );
             const ow = String(owRaw || "").trim().toLowerCase();
-            const yes = (ow === "y" || ow === "yes");
+            const yes = ow === "y" || ow === "yes";
             if (!yes) {
-                // Default (ENTER or anything other than Y) means do not overwrite; reprompt
+                console.log("✖ Not overwriting. Enter another filename.\n");
                 continue;
             }
-            console.log(`Overwriting "${p}"...`);
+            console.log(`Overwriting "${p}".`);
         }
 
         outPath = p;
         break;
     }
 
-    // Write once
-    // Randomize final call order within the HAR
+    // Shuffle and write once
     shuffleInPlace(allEntries);
 
-    const har = {log: {version: "1.2", creator: {name: "build-har-generator", version: "G"}, entries: allEntries}};
+    const har = {
+        log: {
+            version: "1.2",
+            creator: { name: "build-har-generator", version: "1.0" },
+            entries: allEntries
+        }
+    };
+
     fs.writeFileSync(outPath, JSON.stringify(har, null, 2), "utf8");
 
-    // Remember globally for future sessions (keep relative form)
+    // Remember globally for next run
     cfg2.lastUsedHarPath = outPath;
     saveJsonc(CONFIG_PATH, cfg2);
 
-    console.log(`Writing HAR → ${outPath}`);
-    console.log(`✔ ${allEntries.length} ${entryWord(allEntries.length)} written`);
+    console.log(`\n✔ Wrote ${allEntries.length} ${entryWord(allEntries.length)} to ${outPath}\n`);
 })();
+
+

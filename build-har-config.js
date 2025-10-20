@@ -348,9 +348,9 @@ async function pickEntityWithNewFlag(rl, cfg) {
             console.log('No entities yet.');
         }
 
-        console.log('   Q. Quit\n');
+        console.log('   X. eXit\n');
 
-        const prompt = items.length ? 'Existing or New Entity name/number (or Q to quit): ' : 'Enter new entity name (or Q to quit): ';
+        const prompt = items.length ? 'Existing or New Entity name/number (or X to eXit: ' : 'Enter new entity name (X to eXit): ';
 
         const input = (await askWithDefault(rl, prompt, items[0] || '')).trim();
 
@@ -360,7 +360,7 @@ async function pickEntityWithNewFlag(rl, cfg) {
             continue;
         }
 
-        if (/^(q|quit)$/i.test(input)) {
+        if (/^(q|quit|x|exit)$/i.test(input)) {
             console.log('Canceled.');
             process.exit(0);
         }
@@ -644,13 +644,13 @@ function mergeSchema(cfg, entityKey, parsed, {mode}) {
 }
 
 /**
- * summaryPromptsOnce — collect/confirm routing and wrapper details for both sides.
- * Prompts for host, method+path for create/update, id-parameter mapping for updates,
- * and optional JSON wrapper keys used to shape request/response bodies.
+ * summaryPromptsOnce — collect/confirm routing and wrapper details for create/update/get.
+ * Prompts for host, method+path per action, and slug→column mappings for any path slugs.
+ * Also prompts for JSON payload wrapper keys for CREATE/UPDATE.
  *
  * @param {any} rl - Readline interface used for prompts.
  * @param {any} e - Entity object being configured.
- * @param {string} entityKey - Canonical key of the entity.
+ * @param {string} entityKey - Canonical entity key for display context.
  * @returns {Promise<void>}
  */
 async function summaryPromptsOnce(rl, e, entityKey) {
@@ -658,7 +658,6 @@ async function summaryPromptsOnce(rl, e, entityKey) {
     e.routes = e.routes || { host: null, create: {}, update: {}, get: {} };
     const routes = e.routes;
 
-    // Make sure shells exist so prompts don’t crash
     routes.create = routes.create || { path: null, method: null, params: [], query: [], headers: [] };
     routes.update = routes.update || { path: null, method: null, params: [], query: [], headers: [] };
     routes.get    = routes.get    || { path: null, method: null, params: [], query: [], headers: [] };
@@ -669,51 +668,50 @@ async function summaryPromptsOnce(rl, e, entityKey) {
 
     console.log(`\nPlease edit or confirm for entity ${entityKey}:\n`);
 
-    // Host (free-form; Enter keeps current)
+    // Host
     routes.host = await askInlinePrefilled(rl, `(${entityKey}) Host:`, routes.host || '');
 
-    // Helper: verb prompt with constraints, no injected default.
+    // HTTP verb prompt (no defaulting, enforce allowed set if user changes)
     async function promptMethod(label, current) {
         const allowed = ['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'];
         while (true) {
             const raw = await askInlinePrefilled(rl, `(${entityKey}) ${label} method:`, (current || ''));
             const v = String(raw || '').trim();
-            if (v === '') return current || null; // keep as-is (including blank)
+            if (v === '') return current || null;
             const up = v.toUpperCase();
             if (allowed.includes(up)) return up;
             console.log(`Invalid HTTP verb. Allowed: ${allowed.join(', ')}`);
         }
     }
 
-    // Helper: prompt path (free-form; Enter keeps current)
     async function promptPath(label, current) {
         const raw = await askInlinePrefilled(rl, `(${entityKey}) ${label} path:`, (current || ''));
         return (raw ?? '');
     }
 
-    // Helper: detect slug names from path (":id", ":fooBar")
     function extractSlugNames(path) {
         const m = String(path || '').match(/:([A-Za-z0-9_]+)/g) || [];
         return m.map(s => s.slice(1));
     }
 
-    // Helper: walk each slug and prompt for its mapped schema column
     async function promptSlugMapping(label, path, existingParams) {
         const names = extractSlugNames(path);
         if (!names.length) return [];
-
         const existingMap = new Map((existingParams || []).map(p => [String(p?.name || '').toLowerCase(), p?.column || '']));
-
         const result = [];
         for (const n of names) {
             const cur = existingMap.get(n.toLowerCase()) || '';
-            const picked = await askInlinePrefilled(rl, `(${entityKey}) ${label} slug ":${n}" maps to column:`, cur);
+            const picked = await askInlinePrefilled(
+                rl,
+                `(${entityKey}) ${label} slug ":${n}" maps to column (or leave blank to supply via CSV later):`,
+                cur
+            );
             result.push({ name: n, column: String(picked || '').trim() });
         }
         return result;
     }
 
-    // ==== CREATE ====
+    // CREATE
     routes.create.method = await promptMethod('CREATE', routes.create.method);
     routes.create.path   = await promptPath('CREATE',  routes.create.path);
     if (routes.create.path) {
@@ -722,28 +720,16 @@ async function summaryPromptsOnce(rl, e, entityKey) {
         e.payload.create.jsonPayloadWrapper = cwrap ? cwrap : null;
     }
 
-    // ==== UPDATE ====
+    // UPDATE
     routes.update.method = await promptMethod('UPDATE', routes.update.method);
     routes.update.path   = await promptPath('UPDATE',  routes.update.path);
     if (routes.update.path) {
         routes.update.params = await promptSlugMapping('UPDATE', routes.update.path, routes.update.params);
-        const currentPkParam = (routes.update.params && routes.update.params[0]) || {name: 'id', column: ''};
-        let defaultPkColumn = currentPkParam.column || bestPkOrBlank(e);
-        if (!defaultPkColumn) {
-            defaultPkColumn = await promptForPkColumn(rl, e.schema, entityKey);
-        }
-        const pkCol = await askInlinePrefilled(
-            rl,
-            `(${entityKey}) PK column for existing ${entityKey}:`,
-            defaultPkColumn || ''
-        );
-        routes.update.params = [{name: 'id', column: pkCol}];
         const uwrap = await askInlinePrefilled(rl, `(${entityKey}) UPDATE JSON payload wrapper (blank = none):`, e.payload.update.jsonPayloadWrapper || '');
         e.payload.update.jsonPayloadWrapper = uwrap ? uwrap : null;
-
     }
 
-    // ==== GET ====
+    // GET
     routes.get.method = await promptMethod('GET', routes.get.method);
     routes.get.path   = await promptPath('GET',  routes.get.path);
     if (routes.get.path) {
@@ -752,40 +738,6 @@ async function summaryPromptsOnce(rl, e, entityKey) {
 
     console.log('');
 }
-
-/**
- * bestPkOrBlank — choose a primary key column if one is marked, else return "".
- * Scans the entity’s schema for a PK flag and returns the first match to aid ID mapping prompts.
- *
- * @param {any} entity - Entity whose schema is inspected.
- * @returns {string} Column name or empty string.
- */
-function bestPkOrBlank(entity) {
-    const schema = entity?.schema || [];
-    const pk = schema.find(c => c.isPk);
-    return pk ? pk.name : '';
-}
-
-/**
- * promptForPkColumn — let the user pick a primary key from the current schema.
- * Displays a numbered list of columns, validates the choice, and returns the selected column name.
- *
- * @param {any} rl - Readline interface used for prompts.
- * @param {Array<Object>} schema - Current schema rows.
- * @param {string} entityKey - Entity identifier for display context.
- * @returns {Promise<string>} Selected column name.
- */
-async function promptForPkColumn(rl, schema, entityKey) {
-    const cols = (schema || []).map(c => c.name);
-    if (!cols.length) return '';
-    console.log(`\n(${entityKey}) Select a primary key column:`);
-    cols.forEach((n, i) => console.log(`  ${String(i + 1).padStart(2, ' ')}. ${n}`));
-    const choice = await askWithDefault(rl, `(${entityKey}) PK column #`, '1');
-    const idx = parseInt(choice, 10) - 1;
-    if (Number.isInteger(idx) && idx >= 0 && idx < cols.length) return cols[idx];
-    return cols[0];
-}
-
 
 /**
  * getSlugFillsForPath — map route slug placeholders to parameter→column pairs.
@@ -809,8 +761,8 @@ function getSlugFillsForPath(path, paramsArr) {
 
 /**
  * printSummary — display current route and wrapper summary for an entity.
- * Prints host, create/update method+path, JSON wrapper keys, and id parameter
- * mapping, plus slug fill associations for create/update routes.
+ * Prints host, create/update/get method+path, JSON wrapper keys, and slug→column fills
+ * for all routes.
  *
  * @param {Object} e - The entity being summarized.
  * @param {string} entityKey - Canonical entity key for labeling.
@@ -840,6 +792,8 @@ function printSummary(e, entityKey) {
     console.log("");
     console.log(`Current SUMMARY for ${entityKey}:`);
     console.log(`  Host                                     : ${host}`);
+
+    // CREATE
     console.log("");
     console.log(`  CREATE route                             : ${cm} ${cp}`);
     if (cp) {
@@ -847,22 +801,21 @@ function printSummary(e, entityKey) {
             console.log('  slug fills :');
             for (const k of cSlugs) console.log(`    (create) :${k} ← ${cSlugMap[k] || '(not set)'}`);
         }
-        const idParam = uparams[0];
-        if (idParam) {
-            const entLabel = entityKey || 'record';
-            console.log(`  PK column for existing ${entLabel.padEnd(18)}: ${idParam.column || '(not set)'}`);
-        }
         console.log(`  CREATE JSON payload data wrapper         : ${e?.payload?.create?.jsonPayloadWrapper || '(none)'}`);
     }
+
+    // UPDATE
     console.log("");
     console.log(`  UPDATE route                             : ${um} ${up}`);
     if (up) {
         if (uSlugs.length) {
-            console.log('    slug fills :');
-            for (const k of uSlugs) console.log(`      (update) :${k} ← ${uSlugMap[k] || '(not set)'}`);
+            console.log('  slug fills :');
+            for (const k of uSlugs) console.log(`    (update) :${k} ← ${uSlugMap[k] || '(not set)'}`);
         }
         console.log(`  UPDATE JSON payload data wrapper         : ${e?.payload?.update?.jsonPayloadWrapper || '(none)'}`);
     }
+
+    // GET
     console.log("");
     console.log(`  GET route                                : ${gm} ${gp}`);
     if (gp) {
@@ -1060,84 +1013,74 @@ function printHeaders(entity, entityKey) {
 }
 
 /**
- * harFlow — process a sample HAR file to auto-infer route structure and mappings.
- * Loads the HAR, extracts distinct hosts/routes, lets the user pick host and routes,
- * analyzes example entries to fill schema mappings, wrappers, and headers.
+ * harFlow — learn host + example routes from a sample HAR file.
+ * Picks CREATE, UPDATE, (optional) GET, samples headers, applies analysis for create/update,
+ * templates literal IDs in paths into slugs for display, then infers slug→column mappings
+ * for CREATE/UPDATE/GET non-destructively.
  *
- * @param {any} rl - Readline interface for prompts.
- * @param {Object} cfg - Full configuration object.
- * @param {string} entityKey - Entity being updated from HAR analysis.
+ * @async
+ * @param {import('readline').Interface} rl
+ * @param {Object} cfg
+ * @param {string} entityKey
  * @returns {Promise<void>}
  */
 async function harFlow(rl, cfg, entityKey) {
     const ent = cfg.entities[entityKey];
 
-    // HAR path prompt + remember
+    // Ask for HAR path & remember
     const prefillHar = (ent.sources?.harPath || cfg.sourcesLastUsed?.harPath || '');
     const harPath = await askExistingPathPrefill(rl, `(${entityKey}) Path to sample HAR file`, prefillHar);
     rememberSourcePaths(cfg, entityKey, { harPath });
     saveConfigClean(cfg);
 
-    // Load + summarize
+    // Load & summarize
     const har = loadHar(harPath);
     const entries = harvestEntries(har);
     const summary = harSummary(entries);
 
-    // Host picker
+    // Host
     const hostChoice = await pickHostRequireChoice(rl, summary.hosts, entityKey);
 
-    // CREATE candidates (POST-only for create UX)
-    const createCandidates =
-        (summary.routesByMethodPath['POST'] || []).concat(summary.routesByMethodPath['post'] || []);
-    const createChoice = await pickRouteRequireChoice(
-        rl,
-        createCandidates,
-        `CREATE API call example from the example har for ${entityKey}`
-    );
+    // Choices
+    const createCandidates = (summary.routesByMethodPath['POST'] || []).concat(summary.routesByMethodPath['post'] || []);
+    const createChoice = await pickRouteRequireChoice(rl, createCandidates, `CREATE API call example from the example har for ${entityKey}`);
 
-    // UPDATE candidates (POST/PUT/PATCH)
     const updateCandidates = []
         .concat(summary.routesByMethodPath['POST']  || [])
         .concat(summary.routesByMethodPath['PUT']   || [])
         .concat(summary.routesByMethodPath['PATCH'] || []);
-    const updateChoice = await pickRouteRequireChoice(
-        rl,
-        updateCandidates,
-        `UPDATE API call example from the example har for ${entityKey}`
-    );
+    const updateChoice = await pickRouteRequireChoice(rl, updateCandidates, `UPDATE API call example from the example har for ${entityKey}`);
 
-    // Optional GET
-    const getCandidates =
-        (summary.routesByMethodPath['GET'] || []).concat(summary.routesByMethodPath['get'] || []);
+    const getCandidates = (summary.routesByMethodPath['GET'] || []).concat(summary.routesByMethodPath['get'] || []);
     const getChoice = getCandidates.length
         ? await pickRouteRequireChoice(rl, getCandidates, `GET API call example from the example har for ${entityKey}`)
         : null;
-    if (!getChoice) {
-        console.log(`\n(No GET requests found in this HAR; you can set GET later via Summary/Query editors.)\n`);
-    }
+    if (!getChoice) console.log(`\n(No GET requests found in this HAR; you can set GET later via Summary editor.)\n`);
 
-    // Normalize route shells (non-breaking)
+    // Init shells
     ent.routes = ent.routes || { host: null, create: {}, update: {}, get: { method: 'GET', params: [], query: [], headers: [] } };
     ent.routes.host = hostChoice;
 
-    // CREATE path/method
     ent.routes.create = ent.routes.create || {};
-    ent.routes.create.method = 'POST';
-    ent.routes.create.path   = createChoice.path;
-
-    // UPDATE path/method (preserve your display templating for /id/:id)
     ent.routes.update = ent.routes.update || {};
-    ent.routes.update.method = (String(updateChoice.method || 'POST')).toUpperCase();
-    ent.routes.update.path   = templateUpdatePathForDisplay(updateChoice.path);
+    ent.routes.get    = ent.routes.get    || { method: 'GET', params: [], query: [], headers: [] };
 
-    // GET path/method
-    ent.routes.get = ent.routes.get || { method: 'GET', params: [], query: [], headers: [] };
+    // Template paths for display for all three (literal IDs -> :id)
+    ent.routes.create.method = 'POST';
+    ent.routes.create.path   = templatePathForDisplay(createChoice.path);
+    ent.routes.create.params = Array.isArray(ent.routes.create.params) ? ent.routes.create.params : [];
+
+    ent.routes.update.method = (String(updateChoice.method || 'POST')).toUpperCase();
+    ent.routes.update.path   = templatePathForDisplay(updateChoice.path);
+    ent.routes.update.params = Array.isArray(ent.routes.update.params) ? ent.routes.update.params : [];
+
     if (getChoice) {
         ent.routes.get.method = 'GET';
-        ent.routes.get.path   = getChoice.path;
+        ent.routes.get.path   = templatePathForDisplay(getChoice.path);
     }
+    ent.routes.get.params = Array.isArray(ent.routes.get.params) ? ent.routes.get.params : [];
 
-    // Suggest headers from the most recent example for each chosen route (non-destructive)
+    // Headers from newest sample occurrences
     const chooseLatest = (m, p) => findMostRecentMatching(entries, m, p);
     const toHeaderArray = (hdrs) => sanitizeHeaders(hdrs || []);
 
@@ -1150,18 +1093,19 @@ async function harFlow(rl, cfg, entityKey) {
     const uEntry = chooseLatest(ent.routes.update.method, updateChoice.path);
     if (uEntry) {
         const uHeaders = toHeaderArray(uEntry?.req?.headers);
-        if (Array.isArray(uHeaders) && uHeaders.length) ent.routes.update.headers = uHeaders;
+        if (Array.isArray(uHeaders) && uHeaders !== undefined && uHeaders.length) ent.routes.update.headers = uHeaders;
     }
 
+    let gEntry = null;
     if (getChoice) {
-        const gEntry = chooseLatest('GET', getChoice.path);
+        gEntry = chooseLatest('GET', getChoice.path);
         if (gEntry) {
             const gHeaders = toHeaderArray(gEntry?.req?.headers);
             if (Array.isArray(gHeaders) && gHeaders.length) ent.routes.get.headers = gHeaders;
         }
     }
 
-    // === Restore old working behavior: analyze + applyAnalysis for CREATE/UPDATE ===
+    // Analyze create/update (unchanged)
     try {
         if (cEntry) {
             const analysisC = analyzeSingleEntry(cEntry, ent, 'create');
@@ -1171,13 +1115,23 @@ async function harFlow(rl, cfg, entityKey) {
             const analysisU = analyzeSingleEntry(uEntry, ent, 'update');
             if (analysisU) applyAnalysis(ent, analysisU, 'update');
         }
-    } catch {
-        // non-fatal
-    }
+    } catch { /* non-fatal */ }
 
-    // Keep the helpful post-biasing that used to happen here
-    try { if (typeof suggestUpdateIdParam === 'function') suggestUpdateIdParam(ent); } catch {}
-    try { if (typeof biasServerGeneratedFromIdParam === 'function') biasServerGeneratedFromIdParam(ent); } catch {}
+    // Infer slug mappings for all three (non-destructive)
+    try {
+        if (ent.routes.create.path) {
+            const inferredC = inferSlugMappingsForPath(ent, ent.routes.create.path, cEntry, entityKey);
+            ent.routes.create.params = mergeSlugParams(ent.routes.create.params, inferredC);
+        }
+        if (ent.routes.update.path) {
+            const inferredU = inferSlugMappingsForPath(ent, ent.routes.update.path, uEntry, entityKey);
+            ent.routes.update.params = mergeSlugParams(ent.routes.update.params, inferredU);
+        }
+        if (ent.routes.get.path) {
+            const inferredG = inferSlugMappingsForPath(ent, ent.routes.get.path, gEntry, entityKey);
+            ent.routes.get.params = mergeSlugParams(ent.routes.get.params, inferredG);
+        }
+    } catch { /* non-fatal */ }
 }
 
 /**
@@ -1639,7 +1593,7 @@ function fillMappingsFromKeysDeep(schema, analysis, side) {
  *
  * @param {string} colNameLower - Column name (lowercased).
  * @param {Set<string>} leafSet - Set of deep key names (lowercased).
- * @returns {boolean} True if matched, else false.
+ * @returns {string} name of matched leaf
  */
 function exactLeafMatch(colNameLower, leafSet) {
     if (!leafSet || !leafSet.size) return '';
@@ -1652,52 +1606,33 @@ function exactLeafMatch(colNameLower, leafSet) {
 }
 
 /**
- * templateUpdatePathForDisplay — show a readable update path with ':id' placeholder.
- * Replaces a trailing numeric or GUID segment with ':id' for user-friendly display.
- *
- * @param {string} path - Original update route path.
- * @returns {string} Path string with ':id' substitution if applicable.
+ * templatePathForDisplay — normalize a concrete HAR path into a slugged display path.
+ * Converts obvious ID literals into ':id' so analyzers/editors treat them uniformly.
+ *  - Any segment immediately after '/id' becomes ':id'
+ *  - UUID/GUID segments become ':id'
+ *  - Long hex (>=24) or pure-digit (>=6) segments become ':id'
  */
-function templateUpdatePathForDisplay(path) {
-    const segs = String(path || '').split('/').filter(Boolean);
-    if (segs.length >= 4 && segs[segs.length - 2].toLowerCase() === 'id') {
-        segs[segs.length - 1] = ':id';
-        return '/' + segs.join('/');
+function templatePathForDisplay(path) {
+    const p = String(path || '');
+    if (!p) return p;
+
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const longHexRe = /^[0-9a-f]{24,}$/i;
+    const longNumRe = /^\d{6,}$/;
+
+    const parts = p.split('/').filter(s => s.length > 0 || s === '');
+    const out = [];
+
+    for (let i = 0; i < parts.length; i++) {
+        const seg = parts[i];
+        if (seg === '') { out.push(seg); continue; }
+        const prev = i > 0 ? parts[i - 1] : '';
+        if (prev && /^id$/i.test(prev)) { out.push(':id'); continue; }
+        if (uuidRe.test(seg) || longHexRe.test(seg) || longNumRe.test(seg)) { out.push(':id'); continue; }
+        out.push(seg);
     }
-    return path || '';
-}
-
-/**
- * suggestUpdateIdParam — set the entity’s update id parameter if unset.
- * Uses the primary key column when present to fill the idParam field automatically.
- *
- * @param {Object} entity - Entity object being edited.
- * @returns {void}
- */
-function suggestUpdateIdParam(entity) {
-    const schema = entity?.schema || [];
-    const pkCol = schema.find(c => c.isPk)?.name || '';
-    if (!entity.routes) entity.routes = {update: {params: []}};
-    if (!entity.routes.update) entity.routes.update = {params: []};
-    const idParam = (entity.routes.update.params && entity.routes.update.params[0]) || {name: 'id', column: ''};
-    const chosen = idParam.column || pkCol || '';
-    entity.routes.update.params = [{name: 'id', column: chosen}];
-}
-
-/**
- * biasServerGeneratedFromIdParam — bias PK column as server-generated when used as idParam.
- * Ensures primary key columns tied to update id parameters are marked immutable/server-generated.
- *
- * @param {Object} entity - Entity whose schema flags may be updated.
- * @returns {void}
- */
-function biasServerGeneratedFromIdParam(entity) {
-    const idParam = entity?.routes?.update?.params?.[0];
-    if (!idParam) return;
-    const col = (entity.schema || []).find(c => c.name === idParam.column);
-    if (!col) return;
-    col.serverGeneratedOnCreate = true;
-    col.immutable = true;
+    const prefixed = p.startsWith('/') ? '/' : '';
+    return prefixed + out.join('/').replace(/\/{2,}/g, '/');
 }
 
 /**
@@ -2115,11 +2050,21 @@ async function tableEditor(rl, cfg, entityKey) {
     if (!entity.schema) entity.schema = [];
 
     /**
+     * @typedef {Object} NameLookFlags
+     * @property {boolean} email
+     * @property {boolean} phone
+     * @property {boolean} zip
+     * @property {boolean} state
+     * @property {number} [confidence]
+     * @property {string} [kind]
+     */
+
+    /**
      * _nameLooks — quick heuristics about a column name's intent.
      * Identifies likely ids, timestamps, emails, phones, and numeric counters.
      *
      * @param {string} name - Column name.
-     * @returns {{ kind:string, confidence:number }} Heuristic label and confidence.
+     * @returns {NameLookFlags} Heuristic label and confidence.
      */
     const _nameLooks = (name) => {
         const n = String(name || '').toLowerCase();
@@ -2233,6 +2178,7 @@ async function tableEditor(rl, cfg, entityKey) {
      * @returns {Promise<string|null>} Selected pattern or null to skip.
      */
     async function _pickRegexPattern(rl, colName, entityKey, inferredType, currentPattern) {
+        /** @type {{label:string, sample:string}[]} */
         const items = _regexExamplesForType(inferredType || '');
         if (!items.length) {
             console.log(`
@@ -2528,6 +2474,122 @@ function printPreviewTable(cfg, entityKey) {
     const headers = ['#', 'Column', 'Type', 'Len', 'PK', 'createApiField', 'updateApiField', 'Req', 'Immutable', 'SrvGenOnCreate', 'Static', 'GenRegex'];
     const rows = (e.schema || []).map((c, idx) => [String(idx + 1), c.name || '', c.type || '', c.length == null ? '' : String(c.length), c.isPk ? 'PK' : '', c.createApiField || '', c.updateApiField || '', c.required ? 'Y' : '', c.immutable ? 'Y' : '', c.serverGeneratedOnCreate ? 'Y' : '', c.staticValue == null ? '' : String(c.staticValue), c.generatePatternRegex ? (String(c.generatePatternRegex).length > 22 ? String(c.generatePatternRegex).slice(0, 22) + '...' : String(c.generatePatternRegex)) : '']);
     printTable(headers, rows);
+}
+
+/**
+ * inferSlugMappingsForPath — derive slug→column mappings for a given route path.
+ *
+ * Scans a path such as `/companies/:companyId/people/:id` and builds an array of
+ * `{ name, column }` objects representing each slug. Uses lightweight heuristics
+ *
+ * Heuristics (in priority order):
+ *  1. Exact schema column name match (case-insensitive)
+ *  2. For names that end with "Id": try snake_case variant in schema
+ *  3. Entity-name hints (e.g., "<entity>Id" or "<entity>_id")
+ *  4. Echo keys detected in request/response JSON (same/snake variants)
+ *  5. Fallback: blank column (prompt user later in Summary editor)
+ *
+ * @function inferSlugMappingsForPath
+ * @param {Object} entity - The entity config (expects .schema and .routes.*).
+ * @param {string} path - The route path string (e.g. "/people/:id").
+ * @param {Object} [example] - Optional HAR entry for body key hints.
+ * @param {string} [entityKey] - Entity key (e.g., "C2_PERSON"); used for name hints.
+ * @returns {Array<{name:string, column:string}>}
+ */
+function inferSlugMappingsForPath(entity, path, example, entityKey) {
+    const slugNames = (String(path || '').match(/:([A-Za-z0-9_]+)/g) || []).map(s => s.slice(1));
+    if (!slugNames.length) return [];
+
+    const schemaCols = Array.isArray(entity?.schema) ? entity.schema : [];
+    const colByLower = new Map(schemaCols.map(c => [String(c?.name || c || '').toLowerCase(), (c?.name || c || '')]));
+    const hasCol = (n) => colByLower.has(String(n).toLowerCase());
+    const canonCol = (n) => colByLower.get(String(n).toLowerCase());
+    const toSnake = (s) => String(s).replace(/([A-Z])/g, '_$1').replace(/__/g, '_').toLowerCase().replace(/^_/, '');
+
+    // entity-name hint variants
+    const entBase = String(entityKey || '').toLowerCase().replace(/^c2_/, '').replace(/_/g, '');
+    const entIdCandidates = new Set([`${entBase}id`, `${entBase}_id`]);
+
+    // collect deep keys from example bodies
+    function collectKeysDeep(obj, out) {
+        if (!obj || typeof obj !== 'object') return;
+        if (Array.isArray(obj)) { for (const x of obj) collectKeysDeep(x, out); return; }
+        for (const k of Object.keys(obj)) {
+            out.add(k.toLowerCase());
+            const v = obj[k];
+            if (v && typeof v === 'object') collectKeysDeep(v, out);
+        }
+    }
+    const exampleKeys = new Set();
+    try {
+        const reqBody = example?.req?.json ?? example?.req?.body ?? null;
+        const resBody = example?.res?.json ?? example?.res?.body ?? null;
+        collectKeysDeep(reqBody, exampleKeys);
+        collectKeysDeep(resBody, exampleKeys);
+    } catch {}
+
+    const out = [];
+    for (const slug of slugNames) {
+        // 1) exact schema match
+        if (hasCol(slug)) { out.push({ name: slug, column: canonCol(slug) }); continue; }
+
+        // 2) try snake_case variant for CamelId-style names
+        if (slug.endsWith('Id')) {
+            const snake = toSnake(slug);
+            if (hasCol(snake)) { out.push({ name: slug, column: canonCol(snake) }); continue; }
+        }
+
+        // 3) entity-name hints
+        const lower = slug.toLowerCase();
+        if (entIdCandidates.has(lower)) {
+            if (hasCol(slug)) { out.push({ name: slug, column: canonCol(slug) }); continue; }
+            const snake = toSnake(slug);
+            if (hasCol(snake)) { out.push({ name: slug, column: canonCol(snake) }); continue; }
+        }
+
+        // 4) echo keys
+        if (exampleKeys.size) {
+            const snake = toSnake(slug);
+            if (exampleKeys.has(lower) && hasCol(slug)) { out.push({ name: slug, column: canonCol(slug) }); continue; }
+            if (exampleKeys.has(snake) && hasCol(snake)) { out.push({ name: slug, column: canonCol(snake) }); continue; }
+        }
+
+        // 5) fallback blank
+        out.push({ name: slug, column: '' });
+    }
+    return out;
+}
+
+/**
+ * mergeSlugParams — non-destructive merge of inferred slug mappings into existing params.
+ *
+ * - Compares by slug name (case-insensitive)
+ * - Adds new slug entries that don’t exist
+ * - Fills blank `.column` values only when the inferred mapping provides one
+ * - Preserves any existing non-blank columns (user edits win)
+ *
+ * @param {Array<{name:string,column:string}>} existing
+ * @param {Array<{name:string,column:string}>} inferred
+ * @returns {Array<{name:string,column:string}>}
+ */
+function mergeSlugParams(existing = [], inferred = []) {
+    const byName = new Map(
+        (existing || []).map(p => [
+            String(p?.name || '').toLowerCase(),
+            { name: p?.name || '', column: p?.column || '' }
+        ])
+    );
+
+    for (const inf of (inferred || [])) {
+        const key = String(inf?.name || '').toLowerCase();
+        const current = byName.get(key);
+        if (!current) {
+            byName.set(key, { name: inf.name, column: inf.column || '' });
+        } else if (!current.column && inf.column) {
+            byName.set(key, { ...current, column: inf.column });
+        }
+    }
+    return Array.from(byName.values());
 }
 
 /**

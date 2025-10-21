@@ -257,13 +257,21 @@ function ensureCsvHeaderColumns(csvPath, desiredColumns) {
 function appendCsvRowWithHeader(csvPath, columns, rowValues) {
     const p = path.resolve(process.cwd(), csvPath);
     const exists = fs.existsSync(p);
+
+    // simple quote wrapper — replaces any internal double quotes with single quotes
+    const quote = v => {
+        if (v === null || v === undefined) return '""';
+        const s = String(v).replace(/"/g, "'");
+        return `"${s}"`;
+    };
+
     if (!exists || !fs.readFileSync(p, 'utf8').trim()) {
         // new file or empty → write header first
-        fs.writeFileSync(p, columns.join(',') + '\n', 'utf8');
+        fs.writeFileSync(p, columns.map(quote).join(',') + '\n', 'utf8');
     }
-    fs.appendFileSync(p, rowValues.map(v => (v ?? '')).join(',') + '\n', 'utf8');
-}
 
+    fs.appendFileSync(p, rowValues.map(quote).join(',') + '\n', 'utf8');
+}
 
 /**
  * buildGlobalCsvRow — construct a metrics row matching GLOBAL_CSV_COLUMNS.
@@ -312,7 +320,7 @@ async function resolveCsvPath(initialPath, cfgPrefill) {
         // If it doesn't exist, we're done.
         if (!fs.existsSync(p)) return {path: p, mode: 'new'};
 
-        console.log(`\n"${p}" already exists.`);
+        console.log(`"${p}" already exists.`);
         const rawInput = (await ask(`Choose action for ${p}: [A]ppend / [O]verwrite / new filename (default: A): `)).trim();
 
         // Default or explicit Append
@@ -482,6 +490,44 @@ function mergePerUrl(dstMap, srcMap) {
             if (g.maxTime > tgt.maxTime) tgt.maxTime = g.maxTime;
         }
     }
+}
+// Generic route sorter: group by first path segment (the "entity"),
+// then by path alphabetically, then by HTTP method (GET..DELETE..other).
+function compareRouteKeys(a, b) {
+    const strip = s =>
+        String(s).startsWith('route_avg_ms::')
+            ? s.slice('route_avg_ms::'.length)
+            : String(s);
+
+    const parse = k => {
+        const s = strip(k).trim();
+        const sp = s.indexOf(' ');
+        const method = sp > 0 ? s.slice(0, sp).toUpperCase() : '';
+        const path = sp > 0 ? s.slice(sp + 1) : s;
+        const parts = path.replace(/^\//, '').split(/[\/?]/);
+        return {
+            method,
+            path,
+            entity: parts[0] || '',
+        };
+    };
+
+    const A = parse(a);
+    const B = parse(b);
+
+    // sort 1: by entity (first path segment)
+    if (A.entity !== B.entity) return A.entity.localeCompare(B.entity);
+
+    // sort 2: by full path
+    if (A.path !== B.path) return A.path.localeCompare(B.path);
+
+    // sort 3: by method priority
+    const order = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'];
+    const rank = m => {
+        const i = order.indexOf(m);
+        return i === -1 ? order.length : i;
+    };
+    return rank(A.method) - rank(B.method);
 }
 
 
@@ -1060,7 +1106,7 @@ function writeGlobalStatsCsv(args) {
         }
     }
 
-    const dynamicHeaders = Array.from(routeAvgMap.keys()).sort((a,b)=>a.localeCompare(b));
+    const dynamicHeaders = Array.from(routeAvgMap.keys()).sort(compareRouteKeys);
     const dynamicValues  = dynamicHeaders.map(h => routeAvgMap.get(h));
 
     // ---- 3) Upgrade header if needed, then append row ----
@@ -1120,6 +1166,8 @@ function writeGlobalStatsCsv(args) {
             saveConfig(cfg.__path, newCfg);
         }
     }
+    console.log('');
+    console.log('');
 
     let JWT_SECRET = null;
     try {
@@ -1141,7 +1189,7 @@ function writeGlobalStatsCsv(args) {
 
         const entries = parseHarEntries(obj).filter(isXhrHeuristic);
 
-// Base route census + auth detection (single pass)
+        // Base route census + auth detection (single pass)
         const baseRouteCounts = new Map();        // base route → count
         const methodBaseCounts = new Map();       // "METHOD baseRoute" → count
         let hasPopulatedAuth = false;
@@ -1224,7 +1272,7 @@ function writeGlobalStatsCsv(args) {
     for (const info of harInfos) {
         const uniqueRoutes = info.methodBaseCounts ? info.methodBaseCounts.size : 0;
         const lines = info.methodBaseCounts
-            ? Array.from(info.methodBaseCounts.entries()).sort((a,b) => b[1]-a[1]).slice(0, 25)
+            ? Array.from(info.methodBaseCounts.entries()).sort((a,b) => compareRouteKeys(a[0], b[0])).slice(0, 25)
             : [];
         console.log(`Base routes in ${info.path}: ${uniqueRoutes} unique`);
         if (lines.length) {
@@ -1324,7 +1372,7 @@ function writeGlobalStatsCsv(args) {
 
         const pairsG = Array.from(global.perRouteAggTimes.entries())
             .map(([key, agg]) => [key, (agg.totalTime / agg.count).toFixed(2)])
-            .sort((a, b) => a[0].localeCompare(b[0]));
+            .sort((a,b) => compareRouteKeys(a[0], b[0]));
 
         // compute padding widths
         const maxMethod = Math.max(...pairsG.map(([k]) => k.split(' ')[0].length));
